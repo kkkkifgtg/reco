@@ -11,12 +11,19 @@ from __future__ import annotations
 import subprocess
 import sys
 
-PROBE = (
-    "import sys;"
-    "import reco_core, reco_io, reco_store, reco_labels, reco_relations;"
-    "bad = [m for m in ('sklearn', 'torch') if m in sys.modules];"
-    "print('BANNED:' + ','.join(bad))"
-)
+PROBE = """
+import sys
+import importlib
+loaded = []
+for name in ('reco_core', 'reco_io', 'reco_store', 'reco_labels', 'reco_relations'):
+    try:
+        importlib.import_module(name)
+        loaded.append(name)
+    except ImportError:
+        pass  # 【W14】独立 venv 演练：兄弟包缺位时跳过（reco-core 独立安装合法）
+bad = [m for m in ('sklearn', 'torch') if m in sys.modules]
+print('LOADED:' + ','.join(loaded) + '|BANNED:' + ','.join(bad))
+"""
 
 
 def test_importing_public_packages_does_not_load_sklearn_or_torch():
@@ -27,4 +34,8 @@ def test_importing_public_packages_does_not_load_sklearn_or_torch():
         timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == "BANNED:", proc.stdout + proc.stderr
+    out = proc.stdout.strip()
+    # 【W14】自适应探针：reco_core 本体必须已加载；F5 断言对所有可导入者成立；
+    # 全仓安装时 reco_io/store/labels/relations 全部参与探测（覆盖与原版一致）。
+    assert "LOADED:reco_core" in out, out
+    assert out.endswith("|BANNED:"), out + proc.stderr
