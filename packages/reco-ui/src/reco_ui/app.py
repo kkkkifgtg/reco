@@ -16,6 +16,7 @@ from reco_ui.qt import (
     QListWidgetItem,
     QMainWindow,
     QPushButton,
+    QSpinBox,
     QStackedWidget,
     QTableView,
     QThreadPool,
@@ -84,6 +85,8 @@ class MainWindow(QMainWindow):
                 page = RecommendPage(self._store)  # 真实推荐页（切片 2 接线）
             elif pid in ("liked", "candidate"):
                 page = ZonePage(pid, self._store)  # 真实板块页（切片 3）
+            elif pid == "profile":
+                page = ProfilePage(self._store)  # 真实画像页（切片 4）
             else:
                 page = PagePlaceholder(pid)
             self._pages[pid] = page
@@ -160,6 +163,59 @@ class MainWindow(QMainWindow):
 
 
 
+class ProfilePage(QWidget):
+    """画像页：轴权重/样本量/置信度/Top-N/漂移/版本（C6 诚实展示）。"""
+
+    def __init__(self, store=None, parent=None) -> None:
+        super().__init__(parent)
+        self._store = store
+        self.page_id = "profile"
+        self.loaded = False
+        layout = QVBoxLayout(self)
+        title = QLabel("画像")
+        title.setObjectName("page-title")
+        layout.addWidget(title)
+        self._summary = QLabel("")
+        self._summary.setObjectName("dim")
+        self._summary.setWordWrap(True)
+        layout.addWidget(self._summary)
+        layout.addStretch(1)
+
+    def refresh(self) -> None:
+        """重读画像行并渲染（无画像事件 → 诚实降级，不伪造数值）。"""
+        from reco_ui.pages import profile_rows
+
+        self._summary.setText(self._format(profile_rows(self._store)))
+        self.loaded = True
+
+    def summary_text(self) -> str:
+        return self._summary.text()
+
+    def _format(self, data: dict) -> str:
+        if not data.get("has_profile"):
+            return "\n".join([
+                "画像：还不够准（样本不足，仅供参考）",
+                "轴权重：—（暂无稳定轴）",
+                "样本量：n_pos=0, n_neg=0",
+                "置信度：0.00（样本 n 篇，仅供参考）",
+                "Top-N：—",
+                "漂移：—",
+                "版本：—",
+            ])
+        weights = "，".join(f"{k}={v:.2f}" for k, v in dict(data.get("axis_weights") or {}).items())
+        counts = dict(data.get("sample_counts") or {})
+        conf = float(data.get("confidence") or 0.0)
+        tops = "，".join(str(t) for t in tuple(data.get("top_tags") or ())) or "—"
+        return "\n".join([
+            f"轴权重：{weights or '—'}",
+            f"样本量：n_pos={counts.get('n_pos', 0)}, n_neg={counts.get('n_neg', 0)}",
+            f"置信度：{conf:.2f}（样本 n 篇，仅供参考）",
+            f"Top-N：{tops}",
+            f"漂移：{data.get('drift', '—')}",
+            f"版本：v{data.get('version', 0)}",
+        ])
+
+
 class RecommendPage(QWidget):
     """推荐专区页：rank() 输出表格 + 三按钮（不合口味/标为喜欢/加入候选池）。
 
@@ -178,6 +234,16 @@ class RecommendPage(QWidget):
         title = QLabel("推荐专区")
         title.setObjectName("page-title")
         layout.addWidget(title)
+        gen_row = QHBoxLayout()
+        gen_label = QLabel("生成篇数")
+        gen_label.setObjectName("dim")
+        self.generate_spin = QSpinBox()
+        self.generate_spin.setRange(1, 10)
+        self.generate_spin.setValue(2)  # §17 Q7：探索位默认 2 篇
+        gen_row.addWidget(gen_label)
+        gen_row.addWidget(self.generate_spin)
+        gen_row.addStretch(1)
+        layout.addLayout(gen_row)
         self.table = QTableView()
         self.table.setModel(self._model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -211,6 +277,30 @@ class RecommendPage(QWidget):
         if book_id is None:
             return
         record_feedback(self._store, kind, int(book_id), axis=axis)
+
+
+def run_tabs(win: "MainWindow", snapshot_path: str | None = None) -> int:
+    """RECO_PERF_TABS=1 遍历入口：逐页渲染+打点，快照落盘后返回（离屏/CI 用）。"""
+    import json
+    from pathlib import Path
+
+    snapshot = []
+    for row, pid in enumerate(PAGE_ORDER):
+        win._nav.setCurrentRow(row)
+        page = win.page(pid)
+        with perf_span(f"ui.tab.{pid}"):
+            QApplication.processEvents()
+            if hasattr(page, "refresh"):
+                page.refresh()
+            if hasattr(page, "load_now"):
+                page.load_now()
+            QApplication.processEvents()
+        model = getattr(page, "_model", None)
+        snapshot.append({"page": pid, "rows": int(model.rowCount()) if model is not None else 0})
+    if snapshot_path:
+        Path(snapshot_path).write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 0
 
 
 def run(argv=None) -> int:
