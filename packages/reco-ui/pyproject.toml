@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reco-ui"
+version = "0.1.0"
+description = "PyQt6 桌面 GUI 入口（T0 占位，T11 前不引入 PyQt6）"
+requires-python = ">=3.12"
+dependencies = [
+  "reco-core",
+  "reco-io",
+]
+
+[project.scripts]
+reco-ui = "reco_ui:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reco_ui"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

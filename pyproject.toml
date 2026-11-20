@@ -1,0 +1,37 @@
+[project]
+name = "reco"
+version = "0.0.0"
+description = "reco —— 本地小说推荐程序（monorepo 工作区根，非可安装包）"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = [
+    "packages/reco-core",
+    "packages/reco-store",
+    "packages/reco-labels",
+    "packages/reco-relations",
+    "packages/reco-io",
+    "packages/reco-cli",
+    "packages/reco-ui",
+]
+
+[tool.uv.sources]
+reco-core = { workspace = true }
+reco-store = { workspace = true }
+reco-labels = { workspace = true }
+reco-relations = { workspace = true }
+reco-io = { workspace = true }
+reco-cli = { workspace = true }
+reco-ui = { workspace = true }
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["packages"]
+addopts = "-ra --import-mode=importlib"

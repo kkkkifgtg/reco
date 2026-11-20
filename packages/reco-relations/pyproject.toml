@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reco-relations"
+version = "0.1.0"
+description = "人物关系数据与相似度（公开 API 占位，待 T5 起填充）"
+requires-python = ">=3.12"
+dependencies = [
+  "reco-core",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reco_relations"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

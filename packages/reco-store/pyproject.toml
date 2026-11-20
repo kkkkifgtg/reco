@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reco-store"
+version = "0.1.0"
+description = "本地数据根读取与作品索引存储（公开 API 占位，待 T3 起填充）"
+requires-python = ">=3.12"
+dependencies = [
+  "reco-core",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reco_store"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
