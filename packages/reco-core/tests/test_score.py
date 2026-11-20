@@ -35,7 +35,7 @@ from reco_core.score import (
     weight_schedule,
 )
 
-SIM_GOLDEN = 0.8333333333333334  # 【换核演练】欧氏核变体重冻结；余弦原值 0.9494740323391176
+SIM_GOLDEN = 0.9494740323391176
 QUERY = {1: 1.0, 5: 0.8}
 CAND = {1: 0.6, 5: 0.8, 9: 0.2}
 
@@ -64,10 +64,8 @@ def test_S4_similarity_scores_golden_hand_calculated():
 
 
 def test_S4_similarity_edge_cases():
-    # 【换核演练】欧氏核：零向量 d=‖质心‖ → 1/(1+1.64)=0.3787878787878788（诚实保序，
-    # 无余弦的零向量二义性）；候选与质心精确重合（d²=0）→ sim=1.0（核上界，语义正确）。
     empty = similarity_scores([("b0", {})], QUERY)
-    assert empty == [("b0", 0.3787878787878788)]
+    assert empty == [("b0", 0.0)]
     ident = similarity_scores([("bx", {1: 1.0})], {1: 1.0})
     assert ident[0][1] == pytest.approx(1.0, abs=1e-12)
 
@@ -230,7 +228,7 @@ def test_S3b_small_positive_sample_forces_model_weight_zero():
     profile = _profile(weights=(0.4, 0.6, 0.0), n_pos=7, n_neg=5, positives=[QUERY])
     rows = rank([("b1", CAND)], profile, {})
     assert all(r.axis != "model" for r in rows[0].reasons)
-    assert rows[0].score == pytest.approx(SIM_GOLDEN, abs=1e-9)  # 【换核演练】0.8333333333333334
+    assert rows[0].score == pytest.approx(SIM_GOLDEN, abs=1e-9)
 
 
 def test_S3b_all_zero_effective_weights_rejected():
