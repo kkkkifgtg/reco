@@ -104,6 +104,8 @@ _ALLOWED_KEYS = frozenset({
     "source", "confidence", "basis_json", "alias",
     # 行为信号（不含 effective_weight——折叠时重算）
     "kind", "value", "session_id",
+    # 静音持久化（工单 11：mutes 投影事件 payload）
+    "dedup_key", "remaining_days", "expired_at",
     # 关系
     "graph_json", "field_path", "value_json", "extractor_version",
     # 特征
@@ -338,6 +340,18 @@ CREATE TABLE IF NOT EXISTS proposals(
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS mutes(
+  book_id INTEGER PRIMARY KEY REFERENCES books(book_id),
+  dedup_key TEXT,
+  axis TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  expired_at TEXT NOT NULL,
+  remaining_days REAL NOT NULL,
+  updated_at TEXT NOT NULL,
+  schema_version TEXT NOT NULL,
+  config_fingerprint TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS ui_usage(
   page_id TEXT PRIMARY KEY,
   uses INTEGER NOT NULL DEFAULT 0,
@@ -349,6 +363,7 @@ COMPARE_TABLES: tuple[str, ...] = (
     "volumes", "files", "books", "features", "feature_vectors", "tags",
     "tag_aliases", "book_tags", "relation_graphs", "relation_fields",
     "signals", "events", "profile_versions", "rec_runs", "recommendations",
+    "mutes",
 )
 
 
@@ -511,8 +526,21 @@ def _apply_event(conn: sqlite3.Connection, event: Event) -> None:
             "INSERT INTO proposals(kind, payload_json, evidence_json, status, created_at) VALUES(?,?,?,'pending',?)",
             (p["kind"], p.get("payload_json"), p.get("evidence_json"), at),
         )
-    elif t in ("scan_started", "scan_completed", "rec_feedback", "perf_sample"):
-        pass  # 记账型事件：只进事件流，不投影
+    elif t == "mute_upserted":
+        conn.execute(
+            "INSERT INTO mutes(book_id, dedup_key, axis, kind, expired_at, remaining_days,"
+            " updated_at, schema_version, config_fingerprint) VALUES(?,?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(book_id) DO UPDATE SET dedup_key=excluded.dedup_key,"
+            " axis=excluded.axis, kind=excluded.kind, expired_at=excluded.expired_at,"
+            " remaining_days=excluded.remaining_days, updated_at=excluded.updated_at,"
+            " schema_version=excluded.schema_version, config_fingerprint=excluded.config_fingerprint",
+            (event.book_id, p.get("dedup_key"), p["axis"], p["kind"], p["expired_at"],
+             p.get("remaining_days"), at, event.schema_version, event.config_fingerprint),
+        )
+    elif t == "mute_released":
+        conn.execute("DELETE FROM mutes WHERE book_id = ?", (event.book_id,))
+    elif t in ("scan_started", "scan_completed", "rec_feedback", "perf_sample", "pool_added"):
+        pass  # 记账型事件：只进事件流，不投影（pool_added 交互类，§7 隔离）
     else:
         raise ValueError(f"未知事件类型: {t!r}")
 
@@ -595,6 +623,58 @@ class Store:
                 raise
 
         return self.submit(job).result()
+
+    def record_mute(
+        self,
+        book_id: int,
+        *,
+        dedup_key: str | None,
+        axis: str,
+        kind: str,
+        expired_at: str,
+        remaining_days: float,
+        occurred_at: str,
+        config_fingerprint: str,
+        actor: str = "user",
+    ) -> int:
+        """静音落库（替换窗口语义）：mute_upserted 事件 + mutes 投影，同事务。"""
+        return self.append_event(
+            "mute_upserted",
+            book_id=int(book_id),
+            payload={
+                "dedup_key": dedup_key, "axis": axis, "kind": kind,
+                "expired_at": expired_at, "remaining_days": float(remaining_days),
+            },
+            occurred_at=occurred_at,
+            config_fingerprint=config_fingerprint,
+            actor=actor,
+        )
+
+    def release_mute(
+        self, book_id: int, *, occurred_at: str, config_fingerprint: str,
+        actor: str = "system",
+    ) -> int:
+        """静音解除（过期自动解除/人工解除）：mute_released 事件 + 零残留投影。"""
+        return self.append_event(
+            "mute_released", book_id=int(book_id), payload={},
+            occurred_at=occurred_at, config_fingerprint=config_fingerprint, actor=actor,
+        )
+
+    def load_mutes(self) -> list[dict]:
+        """读取当前静音表（重启恢复载体；返回数值/枚举行，不含正文）。"""
+        conn = self.read_conn()
+        try:
+            rows = conn.execute(
+                "SELECT book_id, dedup_key, axis, kind, expired_at, remaining_days,"
+                " updated_at FROM mutes ORDER BY book_id"
+            ).fetchall()
+        finally:
+            conn.close()
+        return [
+            {"book_id": int(r[0]), "dedup_key": r[1], "axis": r[2], "kind": r[3],
+             "expired_at": r[4], "remaining_days": float(r[5]), "updated_at": r[6]}
+            for r in rows
+        ]
 
     def read_events(self) -> list[Event]:
         conn = self.read_conn()
