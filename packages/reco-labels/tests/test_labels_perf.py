@@ -1,12 +1,38 @@
-"""工单 06——性能与 RECO_PERF（W2 打点纪律延续到标签热路径）。"""
+"""工单 06——性能与 RECO_PERF（W2 打点纪律延续到标签热路径）。
+
+【W14 验收修正】原版 import reco_io.perf 跨包违反 ADR-0001 独立可测契约
+（labels 独立 venv 无 reco_io → ImportError）。本文件自持 local perf 助手，
+「phase=<name> ms=<float> → stderr」W2 打点契约逐位复刻并就地断言。
+"""
 from __future__ import annotations
 
+import contextlib
 import re
+import sys
 import time
 
-import reco_io.perf as perf
 from reco_labels import InMemoryLabelsStore, load_taxonomy, match_tags, record_tag_hits, TagHit
 from reco_labels.seed import build_seed_rows
+
+
+class _LocalPerf:
+    """W2 打点契约的最小自持复刻（RECO_PERF=1 时 phase=<name> ms=<float> → stderr）。"""
+
+    def __init__(self):
+        self.perf_enabled = False
+
+    @contextlib.contextmanager
+    def perf_span(self, name):
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            if self.perf_enabled:
+                elapsed = (time.perf_counter() - start) * 1000.0
+                print(f"phase={name} ms={elapsed:.3f}", file=sys.stderr)
+
+
+perf = _LocalPerf()
 
 
 def _store(n_books=200):

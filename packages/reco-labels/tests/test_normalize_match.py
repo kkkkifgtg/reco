@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from reco_io.features import extract_statistics  # W4 接缝（master merge 后天然可用）
 from reco_labels import (
     InMemoryLabelsStore,
     TagHit,
@@ -194,16 +193,7 @@ def test_explain_conflict_hit_discloses_resolution():
     assert any(e.kind == "alias_conflict_resolved" for e in evidence)
 
 
-# ---------- W4 集成（真 extract_statistics；本分支模块已随 merge 就位则跑） ----------
-
-def test_w4_seam_real_extractor_to_hits():
-    """手算：样本含「精神控制」1 次、「洗脑」2 次 → 一个 TagHit，total=3。"""
-    stats = extract_statistics(
-        "他被精神控制了。随后被洗脑，洗脑很彻底。",
-        alias_probe=SEED_MATCHABLE,
-    )
-    assert stats["alias_counts"] == {"mech.hypnosis": 0, "催眠": 0, "精神控制": 1, "洗脑": 2, "mind control": 0}
-    hits = match_tags(stats, _taxonomy())
-    assert len(hits) == 1
-    assert hits[0].tag_id == "mech.hypnosis"
-    assert hits[0].basis["total"] == 3
+# 【W14 验收修正】W4 集成 seam 测试（test_w4_seam_real_extractor_to_hits）移至根
+# tests/test_cross_package_integration.py——reco_io→reco_labels 跨包集成不属本包
+# 独立可测契约（ADR-0001；labels 独立 venv 无 reco_io）。match_tags 契约由本文件
+# 其余用例（合成 stats）完整覆盖。
