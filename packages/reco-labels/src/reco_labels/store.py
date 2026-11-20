@@ -149,9 +149,11 @@ class InMemoryLabelsStore:
                         confidence: float, basis_json: str, updated_at: str) -> None:
         key = (book_id, tag_id)
         existing = self._s.book_tags.get(key)
-        if existing is not None and existing.source in ("manual", "user") and source != existing.source:
+        # D1 语义（audit 第 7 条裁定）：禁令施动者是「自动提取」——仅 auto 被拒；
+        # 人工互可接管（manual↔user），否则 GUI 二次编辑在首次 manual 落位后死锁。
+        if existing is not None and existing.source in ("manual", "user") and source == "auto":
             raise ManualTagProtected(
-                f"book_tags[{book_id},{tag_id}] source={existing.source} 不允许被 {source} 覆盖"
+                f"book_tags[{book_id},{tag_id}] source={existing.source} 不允许被 auto 覆盖"
             )
         self._s.book_tags[key] = BookTagRow(
             book_id=book_id, tag_id=tag_id, source=source,
