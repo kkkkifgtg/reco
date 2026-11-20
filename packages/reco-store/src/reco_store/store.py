@@ -110,7 +110,7 @@ _ALLOWED_KEYS = frozenset({
     "graph_json", "field_path", "value_json", "extractor_version",
     # 特征
     "stats_json", "char_freq_hash_hex", "ngram_hash_digest_hex",
-    "source_mtime_ns", "dim", "vector_blob_b64", "idf_version", "norm",
+    "source_mtime_ns", "dim", "vector_blob_hex", "idf_version", "norm",
     # 画像 / 推荐 / 评估
     "axis_weights_json", "sample_counts_json", "top_tags_json", "weights_json",
     "half_life_days_json", "reason", "event_id_high_water",
@@ -484,12 +484,12 @@ def _apply_event(conn: sqlite3.Connection, event: Event) -> None:
              bytes.fromhex(p["char_freq_hash_hex"]), bytes.fromhex(p["ngram_hash_digest_hex"]),
              at, p.get("source_mtime_ns")),
         )
-    elif t == "vector_computed":
+    elif t == "vector_computed":  # 键名-编码契约：vector_blob_hex 承诺 hex，解码 bytes.fromhex（W5-N）
         conn.execute(
             "INSERT INTO feature_vectors(book_id, vector_blob, dim, idf_version, norm) VALUES(?,?,?,?,?)"
             " ON CONFLICT(book_id) DO UPDATE SET vector_blob=excluded.vector_blob, dim=excluded.dim,"
             " idf_version=excluded.idf_version, norm=excluded.norm",
-            (event.book_id, bytes.fromhex(p["vector_blob_b64"]), p["dim"], p.get("idf_version"), p.get("norm")),
+            (event.book_id, bytes.fromhex(p["vector_blob_hex"]), p["dim"], p.get("idf_version"), p.get("norm")),
         )
     elif t == "profile_updated":
         conn.execute(
