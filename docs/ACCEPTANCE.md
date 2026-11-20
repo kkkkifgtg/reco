@@ -1,8 +1,9 @@
 # reco 全验收清单（W14 收官，2026-11-21）
 
 > 执行环境：分支 feat/14-swap-drill（基线 master 65a07b2）；Python 3.12.14 / pytest 9.2.0；
-> 全仓 pytest **379 passed**（含根 tests/ 集成 1 项）。每条证据为实际执行的命令与输出摘要。
-> 「计划 §11」清单逐条对应；§ = docs/ARCHITECTURE.md v1.2。
+> 全仓 pytest **384 passed**（收官修正：根 testpaths 增 tests/ 目录 + consistency fixture
+> 切回 vector_blob_hex 正式键名，commit 121e6b6——验收过程自身发现并修复的两处收集盲点）。
+> 每条证据为实际执行的命令与输出摘要。「计划 §11」清单逐条对应；§ = docs/ARCHITECTURE.md v1.2。
 
 ## 1. 代码与 git 基线
 
