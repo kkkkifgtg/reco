@@ -17,6 +17,14 @@
 | scipy | 1.18.1 | scipy>=1.18 | sklearn 稀疏矩阵载体 |
 | scikit-learn | 1.9.1 | scikit-learn>=1.9 | TF-IDF 相似度/评估（延迟导入，F5） |
 
+## GUI 依赖（reco-ui 声明，架构 §12/F1，工单 12）
+
+| 包 | 实装版本 | 声明下限 | 说明 |
+|---|---|---|---|
+| PyQt6 | 6.12.1 | PyQt6>=6.12 | Qt 绑定（GPLv3/商业，本地自用不分发 §17 Q2）；Qt6 运行库 6.12.0 随 wheel |
+| PyQt6-Qt6 | 6.12.0 | （PyQt6 元数据依赖） | Qt 运行库 DLL（Qt6/bin 103 DLL） |
+| PyQt6-sip | 13.13.1 | （PyQt6 元数据依赖） | 绑定胶水 |
+
 ## 可选依赖（ADR-0004 可插拔备选；不入 uv.lock/依赖声明）
 
 | 包 | 实装版本 | 说明 |
@@ -43,9 +51,13 @@
 | narwhals-2.29.0-py3-none-any.whl | 0.5 MB |
 | threadpoolctl-3.8.0-py3-none-any.whl | 0.03 MB |
 | cloudpickle-3.1.3-py3-none-any.whl | 0.02 MB |
+| pyqt6-6.12.1-cp310-abi3-win_amd64.whl | 7.1 MB |
+| pyqt6_qt6-6.12.0-py3-none-win_amd64.whl | 79.7 MB |
+| pyqt6_sip-13.13.1-cp312-cp312-win_amd64.whl | 0.05 MB |
 
 - 离线重建命令（架构 §12）：`pip install --no-index --find-links wheels/ "numpy==2.5.5" "scipy==1.18.1" "scikit-learn==1.9.1"`
 - 断网演练: 2026-11-21 于临时 venv 以 `--no-index --find-links wheels/` 离线装齐 7 包并 import 验证通过（exit 0）。
+- PyQt6 离线重建（工单 12 实测）：pip 撞杀软 DLL 锁时，可 `.venv/Scripts/python.exe -m zipfile -e wheels/pyqt6_qt6-*.whl .venv/Lib/site-packages/` 直接解压恢复（2656 文件）。
 - pip 缓存: %LOCALAPPDATA%\\pip\\Cache（交叉印证用）。
 
 ## torch CRT 对齐硬验收（ADR-0004）
