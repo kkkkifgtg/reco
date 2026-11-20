@@ -24,7 +24,7 @@ from reco_ui.qt import (
     QWidget,
     pyqtSignal,
 )
-from reco_ui.pages import FeedbackWorker, ZoneLoader, ZonePage
+from reco_ui.pages import FeedbackWorker, ProfileLoader, RankLoader, ZoneLoader, ZonePage
 from reco_ui.tables import RankTableModel
 from reco_ui.theme import apply_dark_theme
 
@@ -127,18 +127,59 @@ class MainWindow(QMainWindow):
 
     # —— 按需加载机制（§11.1/§11.7；切片 3）——
     def _start_load(self, page_id: str) -> None:
-        """发起 zone 加载：in-flight 去重 + QThreadPool worker（UI 线程零 DB）。"""
+        """发起加载：zone 查询/推荐装配/画像重放全在 QThreadPool worker（UI 线程零 DB，§11.1）。"""
         page = self._pages.get(page_id)
-        if not isinstance(page, ZonePage) or self._store is None:
-            return  # recommend/profile 的加载在切片 4 接打分 worker
+        if self._store is None:
+            return
         if page_id in self._inflight:
             return  # 坑 2：同页并发请求只发一次
-        self._inflight.add(page_id)
-        loader = ZoneLoader(self._store, page_id, lib_ms=_LOAD_LIB_MS)
-        loader.signals.finished.connect(lambda rows, pid=page_id: self._on_zone_loaded(pid, rows))
-        loader.signals.failed.connect(lambda msg, pid=page_id: self._on_zone_failed(pid, msg))
-        self._loaders[page_id] = loader  # 引用保活；完成回调里释放
-        QThreadPool.globalInstance().start(loader)
+        if isinstance(page, ZonePage):
+            self._inflight.add(page_id)
+            loader = ZoneLoader(self._store, page_id, lib_ms=_LOAD_LIB_MS)
+            loader.signals.finished.connect(lambda rows, pid=page_id: self._on_zone_loaded(pid, rows))
+            loader.signals.failed.connect(lambda msg, pid=page_id: self._on_zone_failed(pid, msg))
+            self._loaders[page_id] = loader  # 引用保活；完成回调里释放
+            QThreadPool.globalInstance().start(loader)
+        elif isinstance(page, RecommendPage):
+            # W13 承接①：生产 rank 消费接线（RankLoader → apply_rank，零排序 A6）。
+            self._inflight.add(page_id)
+            loader = RankLoader(self._store)
+            loader.signals.finished.connect(
+                lambda out, err, pid=page_id: self._on_rank_loaded(pid, out, err))
+            self._loaders[page_id] = loader
+            QThreadPool.globalInstance().start(loader)
+        elif isinstance(page, ProfilePage):
+            self._inflight.add(page_id)
+            loader = ProfileLoader(self._store)
+            loader.signals.finished.connect(
+                lambda data, err, pid=page_id: self._on_profile_loaded(pid, data, err))
+            self._loaders[page_id] = loader
+            QThreadPool.globalInstance().start(loader)
+
+    def _on_rank_loaded(self, page_id: str, out, error: str) -> None:
+        """rank worker 完成 → UI 线程渲染；失败不置位、可重试（坑 3）。"""
+        self._inflight.discard(page_id)
+        self._loaders.pop(page_id, None)
+        page = self._pages.get(page_id)
+        if not isinstance(page, RecommendPage):
+            return
+        if error:
+            page.mark_failed(error)
+            return
+        page.apply_rank(out)
+        page.mark_loaded()
+
+    def _on_profile_loaded(self, page_id: str, data, error: str) -> None:
+        self._inflight.discard(page_id)
+        self._loaders.pop(page_id, None)
+        page = self._pages.get(page_id)
+        if not isinstance(page, ProfilePage):
+            return
+        if error:
+            page._summary.setText(f"画像加载失败（可重试）：{error}")
+            return
+        page.apply_profile(data)
+        page.loaded = True
 
     def _on_zone_loaded(self, page_id: str, rows) -> None:
         """worker 完成 → UI 线程渲染；「已加载」仅在成功后置位（坑 3）。"""
@@ -186,6 +227,11 @@ class ProfilePage(QWidget):
         from reco_ui.pages import profile_rows
 
         self._summary.setText(self._format(profile_rows(self._store)))
+        self.loaded = True
+
+    def apply_profile(self, data: dict) -> None:
+        """画像数据渲染（W13 承接②：ProfileLoader worker 产出 → 真实画像行）。"""
+        self._summary.setText(self._format(data))
         self.loaded = True
 
     def summary_text(self) -> str:
@@ -267,6 +313,24 @@ class RecommendPage(QWidget):
 
     def set_rows(self, rows, names=None) -> None:
         self._model.set_rows(rows, names)
+
+    def apply_rank(self, out) -> None:
+        """rank 输出唯一消费面（W13 承接①）：RankRow 序列直接渲染，零排序（A6/§10）。"""
+        self._model.set_rows(list(out["rank_rows"]), dict(out.get("names") or {}))
+
+    def load_now(self) -> None:
+        """同步装填（快照/探针口径）：与生产 worker 同一装配层 rank_candidates，零复制。
+
+        本方法不做任何重排——快照一致性测试与 GUI_PROBE 经此路径取行序。
+        """
+        from reco_store.recommend import rank_candidates
+
+        out = rank_candidates(self._store) if self._store is not None else {"rank_rows": (), "names": {}}
+        self._model.set_rows(list(out["rank_rows"]), dict(out.get("names") or {}))
+        self.mark_loaded()
+
+    def mark_failed(self, message: str) -> None:
+        self._status.setText(f"推荐加载失败（可重试）：{message}")
 
     def mark_loaded(self) -> None:
         self.loaded = True  # 「已加载」仅在按需/预热成功后置位（§11.2 坑 3）

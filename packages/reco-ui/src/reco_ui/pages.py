@@ -45,23 +45,29 @@ def zone_page_rows(store, zone: str, *, limit: int = 200, lib_ms: float = 800.0)
 
 
 def profile_rows(store) -> dict:
-    """画像行（无画像事件时返回空壳；数值与标签 id，无正文，B4/C6）。"""
-    conn = store.read_conn()
-    try:
-        n_events = conn.execute(
-            "SELECT COUNT(*) FROM events WHERE event_type='rec_feedback'").fetchone()[0]
-    finally:
-        conn.close()
-    if n_events == 0:
+    """画像行（W13 承接②：接 W9 真实画像 rehydrate，替代硬编码占位快照）。
+
+    空画像（零反馈事件且无轴）诚实降级；有画像时渲染真实轴权重/样本量/置信度
+    （C6 display 直出）/Top-N/版本。数值与标签 id，无正文（B4）。
+    """
+    from reco_store.recommend import load_profile
+
+    profile = load_profile(store)
+    counts = dict(profile.sample_counts)
+    n_pos = int(counts.get("tag_like", 0))
+    n_neg = int(counts.get("tag_dislike", 0))
+    if n_pos == 0 and n_neg == 0 and not profile.axis_weights:
         return {"has_profile": False}
+    conf = profile.confidence
     return {
         "has_profile": True,
-        "axis_weights": {"tag": 1.0},
-        "sample_counts": {"n_pos": 0, "n_neg": 0},
-        "confidence": 0.0,
-        "top_tags": (),
+        "axis_weights": {str(k): float(v) for k, v in profile.axis_weights.items()},
+        "sample_counts": {"n_pos": n_pos, "n_neg": n_neg},
+        "confidence": float(conf.value),
+        "confidence_display": str(conf.display),
+        "top_tags": tuple(profile.top_tags),
         "drift": "flat",
-        "version": 0,
+        "version": int(profile.version),
     }
 
 
@@ -144,6 +150,74 @@ class FeedbackWorker(QRunnable):
             pass  # 接收方已销毁：结果无人接收
         finally:
             _ACTIVE_FEEDBACK.discard(self)
+
+
+class RankLoaderSignals(QObject):
+    finished = pyqtSignal(object, str)  # (rank 输出 dict, error)；error 非空 = 失败
+
+
+class RankLoader(QRunnable):
+    """QRunnable 推荐装配：rank_candidates（唯一装配层）在池线程执行（§11.1）。
+
+    W13 承接①：RankRow 经生产 worker 路径送达 RecommendPage——CLI/GUI 逐位一致的
+    生产对齐面；装配层零排序复制（A6）。
+    """
+
+    def __init__(self, store) -> None:
+        super().__init__()
+        self._store = store
+        self.signals = RankLoaderSignals()
+        _ACTIVE_LOADERS.add(self)  # 入队即持活（QThreadPool 不持 Python 包装）
+
+    def run(self) -> None:
+        try:
+            from reco_store.recommend import rank_candidates
+
+            with perf_span("ui.rank.load"):
+                out = rank_candidates(self._store)
+        except Exception as exc:  # UI 只收字符串消息，不收异常对象
+            self._emit(None, f"{type(exc).__name__}: {exc}")
+            return
+        self._emit(out, "")
+
+    def _emit(self, out, error: str) -> None:
+        try:
+            self.signals.finished.emit(out, error)
+        except RuntimeError:
+            pass  # UI 已销毁：迟到发射静默丢弃
+        finally:
+            _ACTIVE_LOADERS.discard(self)
+
+
+class ProfileLoaderSignals(QObject):
+    finished = pyqtSignal(object, str)  # (profile_rows dict, error)
+
+
+class ProfileLoader(QRunnable):
+    """QRunnable 画像装配：profile_rows（W9 真实画像重放）在池线程执行（§11.1）。"""
+
+    def __init__(self, store) -> None:
+        super().__init__()
+        self._store = store
+        self.signals = ProfileLoaderSignals()
+        _ACTIVE_LOADERS.add(self)
+
+    def run(self) -> None:
+        try:
+            with perf_span("ui.profile.load"):
+                data = profile_rows(self._store)
+        except Exception as exc:
+            self._emit(None, f"{type(exc).__name__}: {exc}")
+            return
+        self._emit(data, "")
+
+    def _emit(self, data, error: str) -> None:
+        try:
+            self.signals.finished.emit(data, error)
+        except RuntimeError:
+            pass
+        finally:
+            _ACTIVE_LOADERS.discard(self)
 
 
 class ZoneLoader(QRunnable):
