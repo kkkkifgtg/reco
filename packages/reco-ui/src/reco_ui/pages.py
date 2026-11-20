@@ -105,6 +105,12 @@ class LoaderSignals(QObject):
     failed = pyqtSignal(str)
 
 
+# 运行中/排队中的 loader 注册表：QThreadPool 不持 Python 包装引用，
+# 窗口被 GC 后排队 worker 的包装会悬垂 → 退出期 0xC0000409。
+# 注册表在 run() 结束（finally）时释放，保证任何时点 worker 都有活引用。
+_ACTIVE_LOADERS: set = set()
+
+
 class ZoneLoader(QRunnable):
     """QRunnable zone 查询：结果/异常经信号回 UI 线程（UI 线程零 DB，§11.1）。"""
 
@@ -114,6 +120,7 @@ class ZoneLoader(QRunnable):
         self._zone = zone
         self._lib_ms = lib_ms
         self.signals = LoaderSignals()
+        _ACTIVE_LOADERS.add(self)  # 入队即持活（见上方注册表说明）
 
     def run(self) -> None:
         try:
@@ -129,12 +136,16 @@ class ZoneLoader(QRunnable):
             self.signals.finished.emit(rows)
         except RuntimeError:
             pass  # UI 已销毁（测试收尾/窗口关闭）：迟到发射静默丢弃，结果本已无人接收
+        finally:
+            _ACTIVE_LOADERS.discard(self)  # run() 完成，注册表释放
 
     def _emit_failed(self, message: str) -> None:
         try:
             self.signals.failed.emit(message)
         except RuntimeError:
             pass  # 同上：接收方已不存在，迟到失败上报无意义
+        finally:
+            _ACTIVE_LOADERS.discard(self)  # run() 完成，注册表释放
 
 
 class ZonePage(QWidget):
