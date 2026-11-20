@@ -67,6 +67,7 @@ class Event:
 class ReplayReport:
     ok: bool
     diffs: tuple[str, ...]
+    compare_rows: dict[str, list[tuple]] | None = None  # W12b：逐表行快照（C12 隔离断言用）
 
 
 # ---------------------------------------------------------------- 规范化与指纹
@@ -698,6 +699,36 @@ class Store:
             conn.close()
         return [Event(*r) for r in rows]
 
+    # ---- ui_usage（W12b；§11.7 性能数据——独立表，绝不进口味事件流，C12）----
+
+    def bump_ui_usage(self, page_id: str, *, now: str) -> None:
+        """导航/功能点击计数 +1（page_id, uses, last_used）。
+
+        写走单写者队列（submit）；ui_usage 不进事件流、不投影、不参与回放比对。
+        """
+        if not isinstance(page_id, str) or not page_id.strip():
+            raise ValueError("page_id 必须为非空字符串")
+
+        def job(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT INTO ui_usage(page_id, uses, last_used) VALUES(?, 1, ?) "
+                "ON CONFLICT(page_id) DO UPDATE SET uses = uses + 1, last_used = excluded.last_used",
+                (page_id, now),
+            )
+
+        self.submit(job).result()
+
+    def get_ui_usage(self) -> dict[str, dict]:
+        """读 ui_usage 快照：{page_id: {uses, last_used}}（read_conn，WAL 读不阻塞写）。"""
+        conn = self.read_conn()
+        try:
+            rows = conn.execute(
+                "SELECT page_id, uses, last_used FROM ui_usage ORDER BY page_id"
+            ).fetchall()
+        finally:
+            conn.close()
+        return {r[0]: {"uses": int(r[1]), "last_used": r[2]} for r in rows}
+
     def verify_replay(self) -> ReplayReport:
         """ADR-0003：事件流重放进全新库，逐表逐位比对；任何漂移都报告。"""
         events = self.read_events()
@@ -708,7 +739,8 @@ class Store:
             for table in COMPARE_TABLES:
                 if _dump_rows(self.path, table) != _dump_rows(replay_path, table):
                     diffs.append(f"{table}: live={len(_dump_rows(self.path, table))} rows, replay differs")
-        return ReplayReport(ok=not diffs, diffs=tuple(diffs))
+        compare_rows = {table: _dump_rows(self.path, table) for table in COMPARE_TABLES}
+        return ReplayReport(ok=not diffs, diffs=tuple(diffs), compare_rows=compare_rows)
 
 
 def _dump_rows(db_path: str | Path, table: str) -> list[tuple]:
