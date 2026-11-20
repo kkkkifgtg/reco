@@ -355,12 +355,12 @@ def score(candidate_features, profile, config=None, now=None):
     return [(bid, total) for bid, total, _reasons, _sim in _synthesize(candidate_features, profile, config)]
 
 
-def _pick_exploration(book_ids, sims, config):
+def _pick_exploration(book_ids, sims, config, excluded=frozenset()):
     """确定性探索位选取（§17 Q7 + 建议项 3）。
 
     候选集指纹决定旋转起点，固定次序（book_id 升序）决定行走方向——同输入必得
-    同探索位；舒适区顶部（相似度并列最高者）不作探索位，全并列时池取全体候选；
-    池不大于配额时不探索（全员探索=没有探索）。
+    同探索位；舒适区顶部（相似度并列最高者）与 excluded 成员不作探索位，
+    全并列时池取全体未排除候选；池不大于配额时不探索（全员探索=没有探索）。
     """
     try:
         count = int((config or {}).get("exploration_count", _DEFAULT_EXPLORATION))
@@ -369,25 +369,29 @@ def _pick_exploration(book_ids, sims, config):
     if count <= 0 or not book_ids:
         return set()
     top = max(sims)
-    non_top = sorted(bid for bid, s in zip(book_ids, sims) if s < top)
-    pool = non_top if non_top else sorted(book_ids)
+    non_top = sorted(bid for bid, s in zip(book_ids, sims)
+                     if s < top and bid not in excluded)
+    pool = non_top if non_top else sorted(bid for bid in book_ids if bid not in excluded)
     if len(pool) <= count:
         return set()
     start = int(fingerprint_of(book_ids), 16) % len(pool)
     return {pool[(start + i) % len(pool)] for i in range(count)}
 
 
-def rank(candidate_features, profile, config=None, now=None):
+def rank(candidate_features, profile, config=None, now=None, *, exploration_exclude=frozenset()):
     """唯一排序入口（§6.3）：list[RankRow]，CLI/GUI 不得有第二条排序路径。
 
     同分按 book_id 升序稳定次序；探索位按候选集指纹确定性选取（默认 2 条）。
+    exploration_exclude：不参与探索位选取的 book_id（通用排除能力，工单 10
+    反馈层的静音语义由调用方负责——score 本身不知道「静音」概念，§6.5-1）。
     """
     _reject_semantic_config(config)
     rows = _synthesize(candidate_features, profile, config)
     if not rows:
         return []
     ordered = sorted(rows, key=lambda r: (-r[1], r[0]))
-    exploration = _pick_exploration([r[0] for r in ordered], [r[3] for r in ordered], config)
+    exploration = _pick_exploration([r[0] for r in ordered], [r[3] for r in ordered], config,
+                                    excluded=exploration_exclude)
     return [
         RankRow(book_id=bid, score=total, rank=i, reasons=reasons,
                 is_exploration=bid in exploration)
