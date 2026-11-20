@@ -18,12 +18,17 @@ from reco_ui.qt import (
     QPushButton,
     QStackedWidget,
     QTableView,
+    QThreadPool,
     QVBoxLayout,
     QWidget,
     pyqtSignal,
 )
+from reco_ui.pages import ZoneLoader, ZonePage
 from reco_ui.tables import RankTableModel
 from reco_ui.theme import apply_dark_theme
+
+# 分级超时（§11.2 坑 1）：worker 内 zone 查询墙钟上限（慢库不冻结 UI）。
+_LOAD_LIB_MS = 200.0
 
 PAGE_ORDER = ("liked", "candidate", "recommend", "profile")
 PAGE_LABELS = {
@@ -64,6 +69,8 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self._store = store
         self._pages: dict[str, PagePlaceholder] = {}
+        self._inflight: set[str] = set()  # 坑 2：in-flight 去重
+        self._loaders: dict[str, ZoneLoader] = {}  # 持有运行中 loader 的 Python 引用（QThreadPool 不持包装）
         self._nav = QListWidget()
         self._nav.setObjectName("nav")
         self._stack = QStackedWidget()
@@ -75,13 +82,17 @@ class MainWindow(QMainWindow):
         for pid in PAGE_ORDER:
             if pid == "recommend":
                 page = RecommendPage(self._store)  # 真实推荐页（切片 2 接线）
+            elif pid in ("liked", "candidate"):
+                page = ZonePage(pid, self._store)  # 真实板块页（切片 3）
             else:
                 page = PagePlaceholder(pid)
             self._pages[pid] = page
             self._stack.addWidget(page)
             QListWidgetItem(PAGE_LABELS[pid], self._nav)
         self._nav.currentRowChanged.connect(self._on_nav)
+        self.page_requested.connect(self._start_load)  # UI 线程只发起（§11.1）
         self._nav.setCurrentRow(2)  # 默认推荐专区（恒热，§11.7）
+        self.page_requested.emit("liked")  # 首屏自动预热 liked（异步，不阻塞骨架）
         side = QWidget()
         side_layout = QVBoxLayout(side)
         side_layout.setContentsMargins(8, 8, 8, 8)
@@ -108,8 +119,44 @@ class MainWindow(QMainWindow):
             return
         page = self._pages[PAGE_ORDER[row]]
         if not page.loaded:
-            # UI 线程只发起；真实加载在 QThreadPool worker（切片 2 接入）。
+            # UI 线程只发起；真实加载在 QThreadPool worker（切片 3 接入）。
             self.page_requested.emit(page.page_id)
+
+    # —— 按需加载机制（§11.1/§11.7；切片 3）——
+    def _start_load(self, page_id: str) -> None:
+        """发起 zone 加载：in-flight 去重 + QThreadPool worker（UI 线程零 DB）。"""
+        page = self._pages.get(page_id)
+        if not isinstance(page, ZonePage) or self._store is None:
+            return  # recommend/profile 的加载在切片 4 接打分 worker
+        if page_id in self._inflight:
+            return  # 坑 2：同页并发请求只发一次
+        self._inflight.add(page_id)
+        loader = ZoneLoader(self._store, page_id, lib_ms=_LOAD_LIB_MS)
+        loader.signals.finished.connect(lambda rows, pid=page_id: self._on_zone_loaded(pid, rows))
+        loader.signals.failed.connect(lambda msg, pid=page_id: self._on_zone_failed(pid, msg))
+        self._loaders[page_id] = loader  # 引用保活；完成回调里释放
+        QThreadPool.globalInstance().start(loader)
+
+    def _on_zone_loaded(self, page_id: str, rows) -> None:
+        """worker 完成 → UI 线程渲染；「已加载」仅在成功后置位（坑 3）。"""
+        self._inflight.discard(page_id)
+        self._loaders.pop(page_id, None)
+        page = self._pages.get(page_id)
+        if isinstance(page, ZonePage):
+            page.apply_rows(rows)
+
+    def _on_zone_failed(self, page_id: str, message: str) -> None:
+        """worker 失败 → 清 in-flight、不置位、提示可重试（坑 3）。"""
+        self._inflight.discard(page_id)
+        self._loaders.pop(page_id, None)
+        page = self._pages.get(page_id)
+        if isinstance(page, ZonePage):
+            page.mark_failed(message)
+
+    def closeEvent(self, event) -> None:  # noqa: N802（Qt 命名）
+        """退出前泄洪线程池，避免销毁后信号回访已删对象（Qt 生命周期）。"""
+        QThreadPool.globalInstance().waitForDone(3000)
+        super().closeEvent(event)
 
 
 

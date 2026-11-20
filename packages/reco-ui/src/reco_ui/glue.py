@@ -52,6 +52,22 @@ def seed_books(store: Store, *, books: int, liked: int, candidate: int, now=None
     return names
 
 
+def zone_rows(store: Store, zone: str, *, limit: int = 200) -> list[tuple]:
+    """专区行读取（独立只读连接；行 = (book_id, 名称, 大小)，无正文，B 类审计点）。"""
+    conn = store.read_conn()
+    try:
+        raw = conn.execute(
+            "SELECT b.book_id, b.display_name, b.size_bytes"
+            " FROM files f JOIN books b ON b.book_id = f.book_id"
+            " WHERE f.zone = ? AND f.present = 1"
+            " ORDER BY b.book_id LIMIT ?",
+            (zone, int(limit)),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [(int(r[0]), str(r[1]), int(r[2])) for r in raw]
+
+
 def _dedup_of(store: Store, book_id: int) -> str | None:
     conn = store.read_conn()
     try:
