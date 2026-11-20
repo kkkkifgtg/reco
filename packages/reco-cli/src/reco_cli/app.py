@@ -39,37 +39,20 @@ def _utc_now_iso() -> str:
 
 
 def _load_profile(store):
-    """事件流重放 → 画像（W9 rehydrate 同流；只读）。"""
-    from reco_core.feedback import rehydrate_from_events
+    """事件流重放 → 画像（W13：委托共享装配层，零复制 §13）。"""
+    from reco_store.recommend import load_profile
 
-    return rehydrate_from_events(store.read_events())
+    return load_profile(store)
 
 
 def mute_map_from_store(store) -> dict[str, Any]:
-    """store 静音行 → feedback 层 MuteWindow 映射（dedup_key 优先；过期行过滤）。
+    """store 静音行 → feedback 层 MuteWindow 映射（W13：委托共享装配层，零复制 §13）。
 
-    过滤只看 expired_at 时刻（E8 语义由 MuteWindow.with_remaining 复核）；
-    零静音返回空 dict（过期自动解除后零残留）。
+    旧 CLI 本地实现已收敛进 reco_store.recommend（CLI/GUI 同源）；本别名保留公开契约。
     """
-    from reco_core.feedback import MuteWindow
+    from reco_store.recommend import mute_map_from_store as _shared
 
-    mute: dict[str, Any] = {}
-    now = datetime.now(timezone.utc)
-    for row in store.load_mutes():
-        try:
-            expired = datetime.fromisoformat(row["expired_at"])
-            if expired.tzinfo is None:
-                expired = expired.replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue  # 时刻非法的行不进映射（诚实过滤，不猜）
-        if (expired - now).total_seconds() <= 0:
-            continue  # 已过期：不恢复（工单 10 过期自动解除语义）
-        key = str(row["dedup_key"]) if row["dedup_key"] else str(row["book_id"])
-        mute[key] = MuteWindow(
-            kind=row["kind"], expired_at=row["expired_at"],
-            remaining_days=float(row["remaining_days"]), axis=row["axis"],
-        )
-    return mute
+    return _shared(store)
 
 
 # ---------------------------------------------------------------- report
@@ -146,27 +129,18 @@ def _confidence_dict(conf) -> dict:
 
 
 def cmd_recommend(db, *, as_json=True) -> int:
-    """推荐列表：事件流 → 画像 → 静音感知 rank 唯一入口（A6）。"""
-    from reco_core.feedback import rank_only
+    """推荐列表：共享装配层 → rank 唯一入口（A6；W13 真实向量接线，零复制 §13）。
+
+    装配（库态→rank 输入）与 GUI 同源（reco_store.recommend.rank_candidates）；
+    本入口只做输出序列化，零排序、零装配复制。
+    """
+    from reco_store.recommend import rank_candidates
 
     with perf_span("cli.recommend"):
         store = open_store(db)
         try:
-            profile = _load_profile(store)
-            mute = mute_map_from_store(store)
-            conn = store.read_conn()
-            try:
-                rows = conn.execute(
-                    "SELECT book_id, dedup_key FROM books ORDER BY book_id"
-                ).fetchall()
-            finally:
-                conn.close()
-            candidates = [(f"b{bid}", {"dedup_key": key, "vector": {}}) for bid, key in rows]
-            positive_vectors = tuple(
-                vec for _bid, spec in candidates for vec in [spec["vector"]] if vec
-            )
-            out = rank_only(candidates, profile, mute=mute, positive_vectors=positive_vectors)
-            conf = profile.confidence
+            out = rank_candidates(store)
+            conf = out["profile"].confidence
             payload = {
                 "items": [
                     {"book_id": row.book_id, "score": float(row.score),
@@ -308,11 +282,17 @@ def cmd_replay(db) -> int:
 # ---------------------------------------------------------------- eval
 
 def cmd_eval(db) -> int:
-    """评估入口：小样本诚实降级（§6.3：n_pos≥10 且 n_neg≥10 才评估）。"""
+    """评估入口：真实样本接线 + 持久化门（W13/W8 接缝②；§6.3 ≥10 才评估）。"""
+    from datetime import datetime, timezone as _tz
+
+    from reco_core.profile import persist_evaluation_gate
+    from reco_core.score import evaluate_pairwise
+    from reco_store.recommend import load_eval_samples, load_profile
+
     with perf_span("cli.eval"):
         store = open_store(db)
         try:
-            profile = _load_profile(store)
+            profile = load_profile(store)
             counts = profile.sample_counts
             n_pos = int(counts.get("tag_like", 0))
             n_neg = int(counts.get("tag_dislike", 0))
@@ -322,11 +302,25 @@ def cmd_eval(db) -> int:
                      "display": f"样本 {n_pos}/{n_neg}（正/负），不足以判定，不评估"},
                     ensure_ascii=False))
                 return 0
-            from reco_core.score import evaluate_pairwise
-
-            result = evaluate_pairwise([], None)
-            print(json.dumps({"status": "ok", "auc": getattr(result, "auc", None)},
-                             ensure_ascii=False))
+            samples = load_eval_samples(store)  # W11 遗留闭合：真实样本（非 []）
+            result = evaluate_pairwise(samples, None)
+            now = datetime.now(_tz.utc)
+            eval_event_id = persist_evaluation_gate(
+                store, method="pairwise_cv",
+                n_pos=int(result.get("n_pos", n_pos)), n_neg=int(result.get("n_neg", n_neg)),
+                folds=int(result.get("folds", 0)), auc=float(result.get("auc") or 0.0),
+                ci_low=float(result.get("ci_low") or 0.0),
+                ci_high=float(result.get("ci_high") or 0.0),
+                now=now, config_fingerprint="cli/eval/1",
+                notes=str(result.get("verdict", "")),
+            )  # ≥10 门：不足时内部拒绝写入（W8 接缝②强制）
+            print(json.dumps({
+                "status": "ok", "auc": result.get("auc"),
+                "ci_low": result.get("ci_low"), "ci_high": result.get("ci_high"),
+                "verdict": result.get("verdict"),
+                "n_pos": result.get("n_pos", n_pos), "n_neg": result.get("n_neg", n_neg),
+                "eval_run_event_id": eval_event_id,
+            }, ensure_ascii=False))
             return 0
         finally:
             store.close()
