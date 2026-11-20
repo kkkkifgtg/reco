@@ -118,11 +118,10 @@ def _seed_rich(store):
         dims = list(range(n))
         weights = [round(0.05 + ((i * 7 + d * 3) % 19) / 40.0, 4) for d in dims]
         blob = struct.pack(f">{n}i", *dims) + struct.pack(f">{n}d", *weights)
-        # 临时对齐（W5-N 裁定统一 hex，merge 前 master 仍为 vector_blob_b64）——
-        # W5-N merge 后本 fixture 切回正式键名 vector_blob_hex 并复跑全量（captain 协调项）。
+        # W5-N 裁定统一 hex 键名（vector_blob_b64 已入白名单外，写入层拒绝）。
         store.append_event(
             "vector_computed", book_id=i,
-            payload={"vector_blob_b64": blob.hex(),
+            payload={"vector_blob_hex": blob.hex(),
                      "dim": n, "idf_version": "t13-idf/1",
                      "norm": math.sqrt(sum(w * w for w in weights))},
             occurred_at=T0, config_fingerprint="t13/vectors/1")

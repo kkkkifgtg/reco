@@ -33,5 +33,5 @@ dev = ["pytest>=8.0"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
-testpaths = ["packages"]
+testpaths = ["packages", "tests"]
 addopts = "-ra --import-mode=importlib"
