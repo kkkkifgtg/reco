@@ -7,7 +7,12 @@ name = "reco-core"
 version = "0.1.0"
 description = "核心领域模型与口味画像（公开 API 占位，待 T2 起填充）"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    # 架构 §12/F1 修订：相似度与评估的唯一使用方在此声明，版本下限对齐 F-8 评审实测。
+    "numpy>=2.5",
+    "scipy>=1.18",
+    "scikit-learn>=1.9",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/reco_core"]
