@@ -6,6 +6,8 @@
 - events 只允许 INSERT：写入层校验 + 触发器硬保险拒绝 UPDATE/DELETE（C1）。
 - payload 白名单：仅数值/枚举/哈希/标签/路径/原因；effective_weight 显式
   禁止——折叠时由 occurred_at + config_fingerprint 重算，不存列（B6）。
+- book_tags 人工优先双保护（W6 收敛）：manual/user 行不被 label_set(auto)
+  覆盖、不被 label_cleared 清理；只有 auto 行可被清理（D1+F2）。
 - 去重唯一硬过滤（F3/§9）：dedup_key = sha256(size_bytes + \x1f + 规范化名)；
   规范化 = NFKC → casefold → 空白折叠去首尾；括号与扩展名保留参与比较。
 - verify_replay：事件流重放进全新库，与存量投影逐表逐位比对（ADR-0003）；
@@ -376,21 +378,17 @@ def _resolve_or_create_book(conn: sqlite3.Connection, p: dict, at: str) -> int:
 
 
 def _apply_label_set(conn: sqlite3.Connection, book_id: int | None, p: dict, at: str) -> None:
-    """D1：source=manual 的行永不被自动提取覆盖——写入层拒绝，非调用方自觉。"""
+    """D1+F2（W6 收敛）：人工优先双保护——auto 来源的 label_set 永不覆盖
+    manual/user 行（写入层拒绝，非调用方自觉）；manual/user 属人工权威、
+    彼此可接管；label_cleared 只清理 auto 行。
+    """
     source = p.get("source", "auto")
-    if source == "manual":
-        conn.execute(
-            "INSERT INTO book_tags(book_id, tag_id, source, confidence, basis_json, updated_at)"
-            " VALUES(?,?,?,?,?,?) ON CONFLICT(book_id, tag_id) DO NOTHING",
-            (book_id, p["tag_id"], source, p.get("confidence"), p.get("basis_json"), at),
-        )
-        return
     row = conn.execute(
         "SELECT source FROM book_tags WHERE book_id = ? AND tag_id = ?",
         (book_id, p["tag_id"]),
     ).fetchone()
-    if row is not None and row[0] == "manual":
-        return  # manual 永不被 auto/user 覆盖
+    if row is not None and row[0] in ("manual", "user") and source == "auto":
+        return  # 双保护：auto 不覆盖人工行（W6 协议 ManualTagProtected 对应位）
     conn.execute(
         "INSERT INTO book_tags(book_id, tag_id, source, confidence, basis_json, updated_at)"
         " VALUES(?,?,?,?,?,?)"
@@ -435,8 +433,8 @@ def _apply_event(conn: sqlite3.Connection, event: Event) -> None:
     elif t == "label_set":
         _apply_label_set(conn, event.book_id, p, at)
     elif t == "label_cleared":
-        conn.execute("DELETE FROM book_tags WHERE book_id = ? AND tag_id = ? AND source != 'manual'",
-                     (event.book_id, p["tag_id"]))
+        conn.execute("DELETE FROM book_tags WHERE book_id = ? AND tag_id = ? AND source = 'auto'",
+                     (event.book_id, p["tag_id"]))  # F2：只清 auto 行；manual/user 双保护
     elif t == "signal_recorded":
         conn.execute(
             "INSERT INTO signals(book_id, kind, value, occurred_at, source, session_id) VALUES(?,?,?,?,?,?)",
