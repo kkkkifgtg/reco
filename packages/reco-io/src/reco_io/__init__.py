@@ -1,7 +1,33 @@
-"""导入导出与推荐专区写盘（公开 API 占位，待 T6 起填充）。"""
+"""目录扫描、增量判定、落位与推荐专区写盘（reco-io 公开 API）。
 
+工单 02：ensure_zones / scan_zones / classify_delta / FileFingerprint。
+"""
 from __future__ import annotations
 
-__all__: list[str] = []
+from reco_io.scanner import (
+    DEFAULT_ZONES,
+    TEXT_EXTS,
+    Changed,
+    Delta,
+    FileFingerprint,
+    Moved,
+    ScanResult,
+    classify_delta,
+    ensure_zones,
+    scan_zones,
+)
+
+__all__ = [
+    "DEFAULT_ZONES",
+    "TEXT_EXTS",
+    "Changed",
+    "Delta",
+    "FileFingerprint",
+    "Moved",
+    "ScanResult",
+    "classify_delta",
+    "ensure_zones",
+    "scan_zones",
+]
 
 __version__ = "0.1.0"
