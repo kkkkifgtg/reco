@@ -167,11 +167,14 @@ def _as_dense(vector):
 
 
 def similarity_scores(candidate_vectors, positive_vectors, config=None):
-    """余弦相似度（手算金标 0.9494740323391176；无 sklearn，F5 安全）。
+    """欧氏距离核相似度【换核演练变体】sim = 1/(1+d²)（手算金标 0.8333333333333334）。
 
-    positive_vectors 取质心后逐候选算余弦：共同维度点积 /（‖质心‖·‖候选‖）。
-    零范数候选 → 0.0（不静默当满分）；positive_vectors 为空 → 全 0.0（无正样本可像）。
-    config 参数按 §6.3 签名保留（当前余弦实现不消费它）。
+    【W14 换核演练】替换自余弦实现——不同度量 + 不同计算路径：
+    质心 → 逐候选平方欧氏距离 d² = Σ(质心_d − 候选_d)² → 核相似 1/(1+d²)。
+    保序性：单位向量下 1/(3−2cosθ) 随 cosθ 严格单调增——排序契约不变；
+    数值契约按变体重冻结（SIM_GOLDEN_E=0.8333333333333334，venv stdlib 独立直算）。
+    零范数候选：d 为到质心的全距离（诚实保序，最高分=与质心重合），
+    无正样本 → 全 0.0；无 sklearn（F5 安全）；config 签名保留不消费。
     """
     if isinstance(positive_vectors, dict):
         positive_vectors = [positive_vectors]
@@ -184,16 +187,17 @@ def similarity_scores(candidate_vectors, positive_vectors, config=None):
             centroid[dim] = centroid.get(dim, 0.0) + weight
     n = len(dense_pos)
     centroid = {dim: weight / n for dim, weight in centroid.items()}
-    q_norm = math.sqrt(sum(w * w for w in centroid.values()))
     out = []
     for book_id, vec in candidate_vectors:
         dense = _as_dense(vec)
-        c_norm = math.sqrt(sum(w * w for w in dense.values()))
-        if q_norm <= 0.0 or c_norm <= 0.0:
-            out.append((book_id, 0.0))
-            continue
-        dot = sum(centroid[d] * dense[d] for d in centroid.keys() & dense.keys())
-        out.append((book_id, dot / (q_norm * c_norm)))
+        d2 = 0.0
+        for dim, cw in centroid.items():
+            diff = cw - dense.get(dim, 0.0)
+            d2 += diff * diff
+        for dim, vw in dense.items():
+            if dim not in centroid:
+                d2 += vw * vw
+        out.append((book_id, 1.0 / (1.0 + d2)))
     return out
 
 

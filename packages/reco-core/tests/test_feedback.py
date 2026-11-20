@@ -56,7 +56,7 @@ COS60 = 0.5000000000000001
 SIN60 = 0.8660254037844387
 COS75 = 0.25881904510252074
 SIN75 = 0.9659258262890683
-TAIL = 0.0492403876506104            # cos10° × 0.05
+TAIL = 0.048525574959967135          # 【换核演练】simE(cos10°)×0.05=1/(3-2cos10°)×0.05；余弦原值 0.0492403876506104
 
 
 def _profile_now(axis_w=0.5):
@@ -197,7 +197,7 @@ def test_S2_expired_mute_lifts_penalty_within_rank():
                      mute={"B1": out["mute_window"]},
                      positive_vectors=[QUERY], now=NOW + timedelta(days=91))
     assert ids_of(out2["rank_rows"])[0] == "B1"
-    assert out2["rank_rows"][0].score == pytest.approx(COS10, abs=1e-9)
+    assert out2["rank_rows"][0].score == pytest.approx(0.9705114991993427, abs=1e-9)  # 【换核演练】simE(cos10°)
 
 
 # ---------- S3：画像秒级更新（W9 折叠对接） ----------
@@ -308,7 +308,7 @@ def test_S5_missing_dedup_key_falls_back_to_book_id():
         _profile_now(), mute=mute, positive_vectors=[QUERY], now=NOW)
     ids = ids_of(out["rank_rows"])
     assert ids == ["B8", "B7"]  # 部分对齐（0.6717）> 静音尾档（0.0492）
-    assert out["rank_rows"][0].score == pytest.approx(0.95 * COS45, abs=1e-12)  # B8 不受静音影响
+    assert out["rank_rows"][0].score == pytest.approx(0.95 * 0.6306019374818708, abs=1e-12)  # B8 不受静音影响【换核演练】0.95×simE(cos45°)
     assert out["rank_rows"][-1].score == pytest.approx(0.05, abs=1e-12)  # 0.05×w_sim×1.0（sim=1）
 
 
