@@ -109,6 +109,41 @@ class LoaderSignals(QObject):
 # 窗口被 GC 后排队 worker 的包装会悬垂 → 退出期 0xC0000409。
 # 注册表在 run() 结束（finally）时释放，保证任何时点 worker 都有活引用。
 _ACTIVE_LOADERS: set = set()
+_ACTIVE_FEEDBACK: set = set()  # 反馈 worker 同款持活注册表（坑 2/生命周期）
+
+
+class FeedbackSignals(QObject):
+    done = pyqtSignal(int, str)  # (event_id, error)；error 非空 = 失败
+
+
+class FeedbackWorker(QRunnable):
+    """反馈落库 worker：record_feedback（含静音窗口）在池线程执行，§11.1。"""
+
+    def __init__(self, store, kind: str, book_id: int, axis=None) -> None:
+        super().__init__()
+        self._store = store
+        self._kind = kind
+        self._book_id = book_id
+        self._axis = axis
+        self.signals = FeedbackSignals()
+        _ACTIVE_FEEDBACK.add(self)
+
+    def run(self) -> None:
+        from reco_ui.glue import record_feedback
+
+        try:
+            eid = record_feedback(self._store, self._kind, self._book_id, axis=self._axis)
+            self._emit(int(eid), "")
+        except Exception as exc:
+            self._emit(0, f"{type(exc).__name__}: {exc}")
+
+    def _emit(self, event_id: int, error: str) -> None:
+        try:
+            self.signals.done.emit(event_id, error)
+        except RuntimeError:
+            pass  # 接收方已销毁：结果无人接收
+        finally:
+            _ACTIVE_FEEDBACK.discard(self)
 
 
 class ZoneLoader(QRunnable):

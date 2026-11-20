@@ -167,7 +167,13 @@ def test_recommend_page_buttons_wire_glue(qapp, store):
     page = RecommendPage(store)
     page.set_rows(GOLD_ROWS, GOLD_NAMES)
     page.table.selectRow(0)  # 选中 book 2
-    page.btn_dislike.click()
+    page.btn_dislike.click()  # 写库在池线程：UI 线程零阻塞（§11.1）
+    from reco_ui.qt import QApplication, QThreadPool
+
+    QThreadPool.globalInstance().waitForDone(3000)
+    QApplication.processEvents()
+    assert page.btn_dislike.isEnabled()  # 完成后按钮恢复（连点防护解除）
+    assert page._status.text() == "已记录"
     conn = store.read_conn()
     try:
         kinds = [r[0] for r in conn.execute(
