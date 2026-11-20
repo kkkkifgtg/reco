@@ -24,7 +24,7 @@ from reco_ui.qt import (
     QWidget,
     pyqtSignal,
 )
-from reco_ui.pages import ZoneLoader, ZonePage
+from reco_ui.pages import FeedbackWorker, ZoneLoader, ZonePage
 from reco_ui.tables import RankTableModel
 from reco_ui.theme import apply_dark_theme
 
@@ -261,6 +261,9 @@ class RecommendPage(QWidget):
         self.btn_dislike.clicked.connect(lambda: self._feedback("dislike", "tag"))
         self.btn_like.clicked.connect(lambda: self._feedback("like", "tag"))
         self.btn_pool.clicked.connect(lambda: self._feedback("add_to_pool", None))
+        self._status = QLabel("")
+        self._status.setObjectName("dim")
+        layout.addWidget(self._status)
 
     def set_rows(self, rows, names=None) -> None:
         self._model.set_rows(rows, names)
@@ -269,14 +272,22 @@ class RecommendPage(QWidget):
         self.loaded = True  # 「已加载」仅在按需/预热成功后置位（§11.2 坑 3）
 
     def _feedback(self, kind: str, axis) -> None:
+        """发起反馈：写库投递线程池（UI 线程零阻塞，§11.1）；连点防护=反馈侧 in-flight 去重（坑 2）。"""
         if self._store is None:
             return
-        from reco_ui.glue import record_feedback
-
         book_id = self._model.book_id_at(self.table.selectionModel().currentIndex().row())
         if book_id is None:
             return
-        record_feedback(self._store, kind, int(book_id), axis=axis)
+        for b in (self.btn_dislike, self.btn_like, self.btn_pool):
+            b.setEnabled(False)  # in-flight：按钮禁用防双写
+        worker = FeedbackWorker(self._store, kind, int(book_id), axis=axis)
+        worker.signals.done.connect(self._on_feedback_done)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_feedback_done(self, event_id: int, error: str) -> None:
+        for b in (self.btn_dislike, self.btn_like, self.btn_pool):
+            b.setEnabled(True)
+        self._status.setText("已记录" if not error else f"反馈失败（可重试）：{error}")
 
 
 def run_tabs(win: "MainWindow", snapshot_path: str | None = None) -> int:
