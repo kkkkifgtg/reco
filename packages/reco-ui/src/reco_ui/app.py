@@ -25,6 +25,7 @@ from reco_ui.qt import (
     pyqtSignal,
 )
 from reco_ui.pages import FeedbackWorker, ProfileLoader, RankLoader, ZoneLoader, ZonePage
+from reco_ui.preload import Preloader
 from reco_ui.tables import RankTableModel
 from reco_ui.theme import apply_dark_theme
 
@@ -71,6 +72,7 @@ class MainWindow(QMainWindow):
         self._store = store
         self._pages: dict[str, PagePlaceholder] = {}
         self._inflight: set[str] = set()  # 坑 2：in-flight 去重
+        self._preloader = None  # W12b：骨架构建完成后在 _build_skeleton 末尾启动
         self._loaders: dict[str, ZoneLoader] = {}  # 持有运行中 loader 的 Python 引用（QThreadPool 不持包装）
         self._nav = QListWidget()
         self._nav.setObjectName("nav")
@@ -96,6 +98,10 @@ class MainWindow(QMainWindow):
         self.page_requested.connect(self._start_load)  # UI 线程只发起（§11.1）
         self._nav.setCurrentRow(2)  # 默认推荐专区（恒热，§11.7）
         self.page_requested.emit("liked")  # 首屏自动预热 liked（异步，不阻塞骨架）
+        # W12b §11.7：首帧骨架渲染完成后空闲档预热热集（QTimer singleShot ~1.5s，
+        # 用户操作可打断；「已加载」只在预热成功后置位——坑 3）。
+        self._preloader = Preloader(self)
+        self._preloader.start()
         side = QWidget()
         side_layout = QVBoxLayout(side)
         side_layout.setContentsMargins(8, 8, 8, 8)
@@ -121,6 +127,14 @@ class MainWindow(QMainWindow):
         if row < 0 or row >= len(PAGE_ORDER):
             return
         page = self._pages[PAGE_ORDER[row]]
+        # W12b 验收 1：导航/功能点击 → ui_usage 计数递增（独立表，C12 不进口味流）。
+        if self._store is not None:
+            from datetime import datetime, timezone
+
+            now = datetime.now(timezone.utc).isoformat()
+            self._store.bump_ui_usage(page.page_id, now=now)
+            if self._preloader is not None:
+                self._preloader.interrupt()  # 用户操作可打断空闲档预热（§11.7）
         if not page.loaded:
             # UI 线程只发起；真实加载在 QThreadPool worker（切片 3 接入）。
             self.page_requested.emit(page.page_id)
@@ -196,6 +210,38 @@ class MainWindow(QMainWindow):
         page = self._pages.get(page_id)
         if isinstance(page, ZonePage):
             page.mark_failed(message)
+
+    # —— W12b 预热契约（Preloader 消费的三方法）——
+    def store(self):
+        return self._store
+
+    def preload_jobs(self) -> dict:
+        """page_id → 预热任务（True=成功）；覆盖 zone 数据页（liked/candidate）。
+
+        recommend/profile 的真实加载在切片 2/4 worker；未在表中 = 无预热任务，
+        Preloader 跳过（恒热页已加载则零动作）。
+        """
+        if self._store is None:
+            return {}
+        return {
+            pid: self._make_zone_job(pid)
+            for pid in ("liked", "candidate")
+            if pid in self._pages
+        }
+
+    def _make_zone_job(self, page_id: str):
+        def job() -> bool:
+            from reco_ui.pages import zone_page_rows
+
+            try:
+                rows = zone_page_rows(self._store, page_id, lib_ms=_LOAD_LIB_MS)
+            except Exception:
+                return False
+            page = self._pages.get(page_id)
+            if isinstance(page, ZonePage):
+                page.apply_rows(rows)
+            return True
+        return job
 
     def closeEvent(self, event) -> None:  # noqa: N802（Qt 命名）
         """退出前泄洪线程池，避免销毁后信号回访已删对象（Qt 生命周期）。"""
