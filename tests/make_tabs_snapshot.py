@@ -16,6 +16,10 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 def main() -> int:
     out = Path(sys.argv[1])
+    out.parent.mkdir(parents=True, exist_ok=True)  # 基线目录自包含创建
+    from reco_ui.qt import QApplication  # 铁律①：QApplication 必须先于任何 QWidget（0xC0000409）
+
+    _qapp = QApplication.instance() or QApplication([])
     from reco_store import open_store
     from reco_ui.app import MainWindow, run_tabs
     from reco_ui.glue import seed_books

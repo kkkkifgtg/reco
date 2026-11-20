@@ -1,0 +1,18 @@
+[
+  {
+    "page": "liked",
+    "rows": 5
+  },
+  {
+    "page": "candidate",
+    "rows": 7
+  },
+  {
+    "page": "recommend",
+    "rows": 0
+  },
+  {
+    "page": "profile",
+    "rows": 0
+  }
+]

@@ -97,9 +97,11 @@ def test_inflight_dedup_and_failure_retry(qapp, store):
     win = MainWindow(store=SlowStore(store))
     page = win.page("liked")
     win._start_load(page)
-    assert win._inflight == {"liked"}          # 第一次进入 in-flight（首屏预热请求被去重）
+    # W13 承接①：recommend 为恒热主面板，构造时 setCurrentRow(2) 触发的 emit 现在真正
+    # 走 RankLoader 装配（旧占位形态直接 return）；liked 的显式请求即第二次请求 → 被去重。
+    assert win._inflight == {"liked", "recommend"}
     win._start_load(page)                       # 去重：重复请求被忽略
-    assert win._inflight == {"liked"}
+    assert win._inflight == {"liked", "recommend"}
     # 等待 worker 完成（慢库 0.25s），让线程池泄洪避免跨测试信号竞态
     deadline = time.monotonic() + 3.0
     while win._inflight and time.monotonic() < deadline:
