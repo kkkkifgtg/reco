@@ -16,6 +16,16 @@ from reco_io.scanner import (
     ensure_zones,
     scan_zones,
 )
+from reco_io.placement import (
+    PlacementError,
+    PlacementMode,
+    PlacementPermissionError,
+    PlacementPolicy,
+    PlacementResult,
+    PlacementVerificationError,
+    StatInfo,
+    place_by_hardlink,
+)
 
 __all__ = [
     "DEFAULT_ZONES",
@@ -24,9 +34,17 @@ __all__ = [
     "Delta",
     "FileFingerprint",
     "Moved",
+    "PlacementError",
+    "PlacementMode",
+    "PlacementPermissionError",
+    "PlacementPolicy",
+    "PlacementResult",
+    "PlacementVerificationError",
     "ScanResult",
+    "StatInfo",
     "classify_delta",
     "ensure_zones",
+    "place_by_hardlink",
     "scan_zones",
 ]
 
