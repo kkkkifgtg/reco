@@ -90,5 +90,6 @@ def test_launch_reports_cli_fallback_when_pyqt6_missing(monkeypatch, capsys):
     monkeypatch.setattr(reco_ui, "_pyqt6_available", lambda: False)
     code = reco_ui.main([])
     assert code == 2
-    out = capsys.readouterr().out + capsys.readouterr().err
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
     assert "CLI" in out
