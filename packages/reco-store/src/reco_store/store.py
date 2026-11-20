@@ -624,6 +624,17 @@ class Store:
 
         return self.submit(job).result()
 
+    def append(self, event: dict) -> int:
+        """persist_feedback 鸭子协议适配（工单 10 约定：dict 事件交 store.append）。"""
+        return self.append_event(
+            str(event.get("event_type")),
+            book_id=event.get("book_id"),
+            payload=dict(event.get("payload") or {}),
+            occurred_at=str(event["occurred_at"]),
+            config_fingerprint=str(event.get("config_fingerprint") or "feedback/1"),
+            actor="user",
+        )
+
     def record_mute(
         self,
         book_id: int,
