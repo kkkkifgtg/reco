@@ -35,8 +35,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Checkout the repository to the GitHub Actions runner
+      # v7 targets Node 24 (v4 targeted Node 20, now deprecated on runners).
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # Execute Codacy Analysis CLI and generate a SARIF output with the security issues identified during the analysis
       - name: Run Codacy Analysis CLI
@@ -54,8 +55,33 @@ jobs:
           # This will handover control about PR rejection to the GitHub side
           max-allowed-issues: 2147483647
 
+      # Guard: only upload a SARIF file that actually contains at least one run.
+      # Codacy CLI can exit 0 but write an empty SARIF ({ "runs": [] }) when no
+      # token is configured or when a sub-tool crashes. codeql-action/upload-sarif
+      # rejects such files with "Invalid request. 1 item required; only 0 were
+      # supplied", which fails the whole job. Verify first, then skip the upload
+      # with a warning instead of failing the build.
+      - name: Verify SARIF file is valid
+        id: verify_sarif
+        if: always()
+        run: |
+          if [ ! -s results.sarif ]; then
+            echo "::warning::Codacy did not produce a non-empty results.sarif. Skipping SARIF upload."
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! python3 -c "import json,sys; d=json.load(open('results.sarif')); sys.exit(0 if d.get('runs') else 1)" 2>/dev/null; then
+            echo "::warning::results.sarif is invalid or has empty runs. Skipping SARIF upload."
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "results.sarif is present and valid ($(wc -c < results.sarif) bytes)."
+          echo "valid=true" >> "$GITHUB_OUTPUT"
+
       # Upload the SARIF file generated in the previous step
+      # v4 is required: v3 is deprecated in December 2026.
       - name: Upload SARIF results file
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() && steps.verify_sarif.outputs.valid == 'true'
         with:
           sarif_file: results.sarif
