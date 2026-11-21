@@ -311,3 +311,12 @@
 - 遗留观察（不阻断，3 条 low）：① sync_zone 每专区独立调 scan_zones 全专区扫描，定时多专区多轮重复 stat——当前规模可接受，后续可缓存单轮快照；② 刷新完成回调 _start_load("recommend") 若恰逢 rank 在途会被 inflight 去重跳过——新落库行要等下一次导航/预热才进 rank 渲染（数据已落库无损，仅展示延迟）；③ 手动刷新无去重，同专区并发双 sync 事件语义幂等（二次 upsert/no-op UPDATE 验证在案）但产生重复事件——低频手动操作可接受。
 
 
+## 2026-11-21T15:35+0800 G2r（t5 审计基线：阅读器边界 + 自动标签边界 + 双闸门现状核对）— PASS（基线就位；流程偏差如实入档）
+
+- 对象：本基线报告 .scratch/reco-impl/G2R-AUDIT-BASELINE.md + audit-checklist §R/§L 追加 + 第 21 条落库（auditor 独立取证，非转述）。方法：共享检出净树断言（0 脏项，仅 4 个未跟踪 .scratch 探针）→ 分支 chore/g2r-audit-baseline → cherry-pick a436be5 → 文档落盘 → 本 PR。
+- 双闸门现状核对（基于真 PR 页面与 git 史，非推测）：① PR #15（RN1，05:32Z merge）与 PR #26（W19 N2 真移动，05:49Z merge）双闸门齐且 pass——PR #26 页面 auditor 结论引第 21 条（a436be5）、test-runner 结论独立在案；② PR #25（Codacy workflow，05:06Z merge）**Audit Trail 区两行均空**，正文仅模板占位，audit-log 零条目——双闸门缺位合并（CI-only 工具票，无 Python 面，正文/标签边界不受影响；不阻断，记入本条流程偏差）；③ 0ccfa12 / 4e794d5 / 7489aaa 三笔 chore（GitHub 工具链/proxy/状态检查脚本，.scratch+scripts 面 +124/-0）**直推 master 无 PR**——脚本收编类历史先例，自本条起 scripting-only 收编亦走 PR-first；④ 第 21 条提交 a436be5 生成后落在陈旧本地基（squash 后未拉取），从未进入 master——本票 cherry-pick 重放落库，消解悬空。
+- 阅读器边界基线：ARCHITECTURE Q12（L951）裁定「GUI 不内建阅读器，详情只显示元数据与统计量」为当前边界事实——阅读器为**将来新增模块**，落地前须过 audit-checklist §R（正文可显示仅限渲染视口、永不落盘/进日志/进诊断/进事件流/进导出物、渲染层无正文驻留、事件 payload 白名单零正文键、详情页默认元数据、实验开关默认关、§B 常驻全查）。
+- 自动标签边界基线：写入层双保护实证——book_tags source=manual/user 由 ManualTagProtected（reco_labels/store.py:155）写入层拒绝，record.py:48-49 跳过路径在先；自动写入仅 source="auto"；test_merge_archive.py/test_takeover_semantics.py 覆盖拒绝路径（manual 与 user 双向）；reco_relations save_relation_fields 同口径（manual 必须 edit=True，storage.py:25）。后续「喜欢专区自动打标签」接真数据时沿用 §D1/D3 + §L（auto 仅经 write-layer API、auto→auto 更新允许、confidence/basis 全量入 payload、域→轴→值 taxonomy 命中、§B.6/B.1 白名单口径不变）。
+- B 类现状抽查（master 7489aaa）：reco-ui 全部内容通道注释级自证「数值/枚举，无正文」（app.py:73/glue.py:56/pages.py:68/sync.py:5/tables.py:5）；PR #26 file_moved payload 恰 path/new_path/zone/st_ino 四键白名单。零正文泄漏证据。
+- 严重度范围声明：以上 ②③ 为流程偏差（medium 记录项），非 §6.5/§B 边界 blocker——下游 t6+/实现票不受阻断，可派发。
+- 常驻守护规则（每票 completed 执行，沿袭不变）：五类全查 + 票内必查项 + §R（阅读器票）/§L（标签票）；审计隔离副本；结论双落（audit-log + PR 页面）；merge 前 Audit Trail 双行非空且 pass。
