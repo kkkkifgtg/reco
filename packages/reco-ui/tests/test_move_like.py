@@ -5,8 +5,8 @@
   move_file_across_zones（os.replace 跨目录同卷原子移动；目标冲突确定性改名
   book(1).txt）→ file_moved（path→new_path+zone）落库（zone 变更唯一事件形态）；
 - 推荐专区「标为喜欢」同接真移动：按钮点击 → LikeMoveWorker →
-  book_id → (源 path, 源 zone) → 源文件移动进 liked/ 目录；推荐行书名 →
-  liked/ 现有产物名（book_id 名空间不同，不猜）；
+  book_id → (源 path, 源 zone) → 源文件移动进 liked/ 目录；无源文件
+  （外部删除）诚实降级不移动；已迁移书重复点击幂等 no-op；
 - 「不合口味」维持负样本（不移动文件）；liked 页右键无「标为喜欢」；
 - 刷新契约：candidate/liked 页 apply_rows 从 db 重查（行随 zone 实况走）。
 逆向验证：删 pages.move_book_to_liked 中的 append_event("file_moved") 调用，
@@ -20,7 +20,18 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
+from reco_core.score import RankRow, Reason
+
 NOW = "2026-11-21T05:00:00+00:00"
+
+# 推荐页供行（与 test_actions 同款黄金行；rank 装配在无画像/向量时诚实 0 行，
+# 推荐真移动测试用 set_rows 直接喂行，聚焦「标为喜欢」的移动语义本身）
+GOLD_ROWS = [
+    RankRow(book_id="b1", score=0.9, rank=1,
+            reasons=(Reason(axis="tag", contribution=0.5, source="similarity"),),
+            is_exploration=False),
+]
+GOLD_NAMES = {"b1": "rec-book.txt"}
 
 
 @pytest.fixture()
@@ -110,8 +121,15 @@ def test_zone_move_conflict_deterministic_rename(qapp, store, tmp_path):
     assert existing.read_text(encoding="utf-8") == "liked 版本。", "已有文件不得被覆盖"
     rows = _read_files(store)
     assert rows == [(str(moved), "liked")]
+    import json as _json
+
     events = _read_events(store)
-    assert events[0][0] == "file_moved" and events[0][1] == str(src) and events[0][2] == str(moved) and events[0][3] == "liked"
+    kinds = [e[0] for e in events]
+    assert kinds.count("file_moved") == 1, f"恰好一条 file_moved，实况: {kinds}"
+    moved_payload = _json.loads(events[kinds.index("file_moved")][1])
+    assert moved_payload["path"] == str(src)
+    assert moved_payload["new_path"] == str(moved)
+    assert moved_payload["zone"] == "liked"
 
 
 def _read_events(store):
@@ -124,12 +142,13 @@ def _read_events(store):
 
 
 def test_zone_move_moves_row_between_tables(qapp, store, tmp_path):
-    """GUI 双表同步：candidate 行消失、liked 行出现（apply_rows 契约刷新）。"""
-    from reco_ui.pages import ZonePage
+    """GUI 双表同步：candidate 行消失、liked 行出现（MainWindow 跨页联动刷新）。"""
+    from reco_ui.app import MainWindow
 
     _seed_physical_candidate(store, tmp_path)
-    cand = ZonePage("candidate", store, data_root=str(tmp_path / "data"))
-    liked = ZonePage("liked", store, data_root=str(tmp_path / "data"))
+    win = MainWindow(store=store, config={"data_root": str(tmp_path / "data")})
+    cand = win.page("candidate")
+    liked = win.page("liked")
     cand.load_now()
     liked.load_now()
     assert cand.row_count() == 1 and liked.row_count() == 0
@@ -142,9 +161,10 @@ def test_zone_move_moves_row_between_tables(qapp, store, tmp_path):
     QApplication.processEvents()
 
     assert cand.row_count() == 0, "candidate 表格行必须消失"
-    assert liked.row_count() == 1, "liked 表格行必须出现"
+    assert liked.row_count() == 1, "liked 表格行必须出现（跨页联动）"
     rows = _read_files(store)
     assert rows[0][1] == "liked"
+    win.close()
 
 
 def test_zone_move_no_selection_is_noop(qapp, store, tmp_path):
@@ -239,7 +259,7 @@ def test_recommend_like_moves_physical_file_from_recommend_zone(qapp, store, tmp
     }, occurred_at=NOW, config_fingerprint="gui/seed/1", actor="system")
 
     page = RecommendPage(store, data_root=str(tmp_path / "data"))
-    page.load_now()
+    page.set_rows(GOLD_ROWS, GOLD_NAMES)  # rank 装配（无画像/向量时诚实 0 行，不进本测）
     page.table.selectRow(0)
     page.btn_like.click()
     from reco_ui.qt import QApplication, QThreadPool
@@ -254,16 +274,14 @@ def test_recommend_like_moves_physical_file_from_recommend_zone(qapp, store, tmp
     assert page._status.text() == "已记录"
 
 
-def test_recommend_like_falls_back_to_liked_products_on_name_mismatch(qapp, store, tmp_path):
-    """书名在 liked/ 无同名产物 → 回退用 liked/ 现有产物名（book_id 名空间不同，不猜）。"""
-    from pathlib import Path
-
+def test_recommend_like_without_source_degrades_honestly(qapp, store, tmp_path):
+    """推荐行无源文件（外部删除 present=0）→ 诚实降级：不移动、不落事件、不猜映射。"""
     from reco_store import dedup_key, normalize_book_name
     from reco_ui.app import RecommendPage
 
     rec_dir = tmp_path / "data" / "推荐专区"
     rec_dir.mkdir(parents=True, exist_ok=True)
-    f = rec_dir / "unrelated-name.txt"
+    f = rec_dir / "vanished.txt"
     f.write_text("合成正文。", encoding="utf-8")
     st = f.stat()
     store.append_event("file_added", payload={
@@ -274,17 +292,15 @@ def test_recommend_like_falls_back_to_liked_products_on_name_mismatch(qapp, stor
         "mtime_ns": int(st.st_mtime_ns),
         "st_dev": int(st.st_dev),
         "st_ino": int(st.st_ino),
-        "display_name": "unrelated-name.txt",
-        "normalized_name": normalize_book_name("unrelated-name.txt"),
-        "dedup_key": dedup_key(int(st.st_size), "unrelated-name.txt"),
+        "display_name": "vanished.txt",
+        "normalized_name": normalize_book_name("vanished.txt"),
+        "dedup_key": dedup_key(int(st.st_size), "vanished.txt"),
     }, occurred_at=NOW, config_fingerprint="gui/seed/1", actor="system")
-
-    liked_dir = tmp_path / "data" / "liked"
-    liked_dir.mkdir(parents=True, exist_ok=True)
-    (liked_dir / "some-liked-product.txt").write_text("已有 liked 产物。", encoding="utf-8")
+    store.append_event("file_removed", payload={"path": str(f)},
+                       occurred_at=NOW, config_fingerprint="gui/seed/1", actor="user")
 
     page = RecommendPage(store, data_root=str(tmp_path / "data"))
-    page.load_now()
+    page.set_rows(GOLD_ROWS, GOLD_NAMES)
     page.table.selectRow(0)
     page.btn_like.click()
     from reco_ui.qt import QApplication, QThreadPool
@@ -292,8 +308,45 @@ def test_recommend_like_falls_back_to_liked_products_on_name_mismatch(qapp, stor
     QThreadPool.globalInstance().waitForDone(8000)
     QApplication.processEvents()
 
-    dst = liked_dir / "some-liked-product.txt"
-    assert dst.is_file(), "回退目标必须存在（liked/ 产物名）"
-    assert not f.exists(), "推荐源文件仍被真移动（源 zone 不限，推荐源也移动）"
-    rows = _read_files(store)
-    assert rows == [(str(dst), "liked")]
+    assert not (tmp_path / "data" / "liked").exists(), "无源文件绝不猜目标移动"
+    evs = [e[0] for e in _read_events(store)]
+    assert "file_moved" not in evs, "无源降级不落移动事件"
+    assert f.is_file(), "物理源文件原地保留（db 标 absent 但不动用户文件）"
+
+
+def test_recommend_like_on_already_moved_book_is_idempotent_noop(qapp, store, tmp_path):
+    """已迁移书重复点击（源已在 liked）→ 幂等 no-op：不重复移动、不落 file_moved。"""
+    from reco_store import dedup_key, normalize_book_name
+    from reco_ui.app import RecommendPage
+
+    liked_dir = tmp_path / "data" / "liked"
+    liked_dir.mkdir(parents=True, exist_ok=True)
+    f = liked_dir / "already-liked.txt"
+    f.write_text("已在喜欢专区。", encoding="utf-8")
+    st = f.stat()
+    store.append_event("file_added", payload={
+        "path": str(f),
+        "zone": "liked",
+        "ext": ".txt",
+        "size_bytes": int(st.st_size),
+        "mtime_ns": int(st.st_mtime_ns),
+        "st_dev": int(st.st_dev),
+        "st_ino": int(st.st_ino),
+        "display_name": "already-liked.txt",
+        "normalized_name": normalize_book_name("already-liked.txt"),
+        "dedup_key": dedup_key(int(st.st_size), "already-liked.txt"),
+    }, occurred_at=NOW, config_fingerprint="gui/seed/1", actor="system")
+
+    page = RecommendPage(store, data_root=str(tmp_path / "data"))
+    page.set_rows(GOLD_ROWS, GOLD_NAMES)
+    page.table.selectRow(0)
+    page.btn_like.click()
+    from reco_ui.qt import QApplication, QThreadPool
+
+    QThreadPool.globalInstance().waitForDone(8000)
+    QApplication.processEvents()
+
+    assert page._status.text() == "已记录", "幂等 no-op 以成功口径反馈"
+    assert f.is_file(), "文件保持在 liked/ 原位"
+    evs = [e[0] for e in _read_events(store)]
+    assert evs == ["file_added"], f"不重复落移动事件，实况: {evs}"

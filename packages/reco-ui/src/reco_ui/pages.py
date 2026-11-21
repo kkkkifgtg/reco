@@ -5,11 +5,24 @@
 §11.2 坑 2：in-flight 去重在 MainWindow 统一裁决；
 §11.2 坑 3：「已加载」仅在成功置位，失败可重试；
 §11.2 坑 7：QMenu 每次按需构建、用后即弃（幂等）。
+
+工单 19（N2）「我喜欢」真移动：
+- 语义裁定：候选池→liked 是用户对既有的唯一一份实体表态归属，用真移动
+  （os.replace 跨目录，同卷原子），不再 place_by_hardlink——落位语义
+  （W3）源保留，会把文件同时留在 candidate/ 与 liked/，zone 语义被破坏；
+  硬链接同盘成本≈0，移动即改目录项，无须复制兜底（与 W3 不同卷场景无关）。
+- 事件形态：file_moved（path→new_path）+ payload 增补 zone=新目录 zone；
+  store 投影以 COALESCE 同步 files.zone（W19 扩展；白名单已含 zone/new_path，
+  无 zone 键的旧移动事件保持 zone 不变，向后兼容可重放）。
+- 失败诚实：os.replace 失败上抛 → worker 捕获报错，不落事件、行保留可重试。
+- 幂等护栏：源已在 liked/（重复点击/已迁移书）→ no-op 不落事件；
+  推荐行无源文件（外部删除）→ 诚实降级不移动、不猜名字映射。
 """
 from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 from reco_io.perf import perf_span
 from reco_ui.qt import (
@@ -120,6 +133,7 @@ class LoaderSignals(QObject):
 # 注册表在 run() 结束（finally）时释放，保证任何时点 worker 都有活引用。
 _ACTIVE_LOADERS: set = set()
 _ACTIVE_FEEDBACK: set = set()  # 反馈 worker 同款持活注册表（坑 2/生命周期）
+_ACTIVE_MOVES: set = set()     # W19：真移动 worker 持活注册表（同坑 2/生命周期）
 _ACTIVE_IMPORTS: set = set()  # W16 F1：导入 worker 持活注册表
 
 
@@ -247,6 +261,41 @@ class ScanWorker(QRunnable):
             pass  # 接收方已销毁
         finally:
             _ACTIVE_IMPORTS.discard(self)
+class LikeMoveSignals(QObject):
+    done = pyqtSignal(bool, str)  # (成功?, error)；error 非空 = 失败
+
+
+class LikeMoveWorker(QRunnable):
+    """「标为喜欢」真移动 worker（池线程：文件移动+落库都不在 UI 线程，§11.1）。
+
+    成功路径：move_book_to_liked 一次完成「os.replace 真移动 + file_moved
+    落库（zone 变更）」。失败路径：不落任何事件，error 字符串回 UI。
+    """
+
+    def __init__(self, store, src_path: str, src_zone: str, data_root: str) -> None:
+        super().__init__()
+        self._store = store
+        self._src_path = src_path
+        self._src_zone = src_zone
+        self._data_root = str(data_root)
+        self.signals = LikeMoveSignals()
+        _ACTIVE_MOVES.add(self)
+
+    def run(self) -> None:
+        try:
+            move_book_to_liked(self._store, self._src_path,
+                               self._data_root, from_zone=self._src_zone)
+            self._emit(True, "")
+        except Exception as exc:  # UI 只收字符串
+            self._emit(False, f"{type(exc).__name__}: {exc}")
+
+    def _emit(self, ok: bool, error: str) -> None:
+        try:
+            self.signals.done.emit(ok, error)
+        except RuntimeError:
+            pass  # 接收方已销毁
+        finally:
+            _ACTIVE_MOVES.discard(self)
 
 
 class FeedbackSignals(QObject):
@@ -392,6 +441,71 @@ class ZoneLoader(QRunnable):
 ZONE_DIR_NAMES = {"liked": "liked", "candidate": "candidate", "推荐专区": "推荐专区"}
 
 
+def _makedirs_zone(data_root, zone: str) -> Path:
+    """W19：移动目标的专区目录（用户点击即意图，目录缺失随移动创建）。"""
+    root = Path(data_root)
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / ZONE_DIR_NAMES[zone]
+    target.mkdir(exist_ok=True)
+    return target
+
+
+def move_file_across_zones(src: Path, dst_dir: Path, dst_zone: str) -> Path:
+    """真移动：os.replace 跨目录（同卷目录项操作，原子）；冲突确定性改名。
+
+    改名对齐 W3 _conflict_free_name 语义（book(1).txt 递增），不覆盖既有文件。
+    返回落位后的目标路径。
+    """
+    src, dst_dir = Path(src), Path(dst_dir)
+    dst = dst_dir / src.name
+    if dst.exists():
+        stem, suffix = src.stem, src.suffix
+        n = 1
+        while (candidate := dst_dir / f"{stem}({n}){suffix}").exists():
+            n += 1
+        dst = candidate
+    os.replace(src, dst)
+    return dst
+
+
+def move_book_to_liked(
+    store: Store,
+    src_path,
+    data_root: str,
+    *,
+    from_zone: str = "candidate",
+) -> Path:
+    """「我喜欢」真移动唯一写入口（工单 19 N2）。
+
+    先 db 找源（from_zone 内 path=src_path 且 present=1），零行=无事可做
+    （重复点击/已移走：no-op 返回 src）；找到才动文件：os.replace 成功后
+    append file_moved（payload 补 zone=新 zone）——文件系统与事件流同一
+    事务语义（文件动了必然落库；落库失败则文件已动，读面以下次扫描/重试
+    收敛，不在 UI 线程做反向补偿）。
+    """
+    from reco_ui.glue import zone_rows
+
+    src = Path(src_path)
+    rows = zone_rows(store, from_zone)
+    book_id = next((int(r[0]) for r in rows
+                    if Path(str(r[1])).name == src.name), None)
+    if book_id is None:
+        return src  # 源不在 from_zone（已移走/重复点击）：no-op 防护
+    dst_dir = _makedirs_zone(data_root, "liked")
+    if src.parent == dst_dir:
+        return src  # 已在 liked：幂等 no-op（不重复移动、不落事件）
+    st = src.stat()  # 源必须真实存在；缺失直接抛（诚实失败）
+    dst = move_file_across_zones(src, dst_dir, "liked")
+    if not os.environ.get("RECO_DISABLE_MOVE_EVENT"):  # 逆向验证开关（默认关）
+        store.append_event("file_moved", payload={
+            "path": str(src),
+            "new_path": str(dst),
+            "zone": "liked",
+            "st_ino": int(st.st_ino),
+        }, occurred_at=_utcnow_iso(), config_fingerprint="gui/move/1", actor="user")
+    return dst
+
+
 def open_zone_folder(data_root, zone: str, *, opener=None) -> str:
     """打开专区数据目录：缺失则创建后 os.startfile。
 
@@ -442,6 +556,7 @@ class ZonePage(QWidget):
         layout.addWidget(self._table, 1)
         self._status = QLabel("待加载")
         self._status.setObjectName("dim")
+        self.zone_changed = None  # W19 N2：跨页联动钩子（MainWindow 注入；页不认识兄弟页）
         layout.addWidget(self._status)
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
@@ -501,6 +616,54 @@ class ZonePage(QWidget):
         worker.signals.done.connect(self._on_import_done)
         QThreadPool.globalInstance().start(worker)
 
+    # —— 工单 19 N2：右键「标为喜欢」真移动 ——
+    def move_selected_book_to_liked(self, row: int) -> bool:
+        """发起真移动：UI 线程只取选行与查源（池线程做移动+落库，§11.1）。
+
+        返回 False = 无选中/空表/源不在本专区（零副作用）。
+        """
+        if self._store is None:
+            return False
+        if not (0 <= row < self._model.rowCount()):
+            return False
+        try:
+            rows = zone_page_rows(self._store, self.zone)
+        except Exception:
+            return False
+        if not (0 <= row < len(rows)):
+            return False
+        book_id = int(rows[row][0])  # 行=(book_id,名称,大小,备注)
+        conn = self._store.read_conn()
+        try:
+            src_row = conn.execute(
+                "SELECT path FROM files WHERE book_id = ? AND zone = ? AND present = 1"
+                " ORDER BY file_id LIMIT 1", (int(book_id), self.zone)).fetchone()
+        finally:
+            conn.close()
+        if src_row is None:
+            return False
+        self._status.setText("移动中…")
+        worker = LikeMoveWorker(self._store, str(src_row[0]), self.zone,
+                                self._data_root)
+        worker.signals.done.connect(self._on_move_done)
+        QThreadPool.globalInstance().start(worker)
+        return True
+
+    def _on_move_done(self, ok: bool, error: str) -> None:
+        """移动完成 → 本页重查（行随 zone 实况走）+ 状态摘要（刷新后写）。"""
+        if not ok:
+            self._status.setText(f"移动失败（可重试）：{error}")
+            return
+        try:
+            rows = zone_page_rows(self._store, self.zone)
+        except Exception as exc:
+            self.mark_failed(f"{type(exc).__name__}: {exc}")
+            return
+        self.apply_rows(rows)
+        if self.zone_changed is not None:
+            self.zone_changed(self)  # 对侧专区页同步重查（两表格联动，MainWindow 注入）
+        self._status.setText("已移到喜欢专区")
+
     def _on_import_done(self, imported: int, skipped: int, rejected: int, error: str) -> None:
         """导入完成 → 重查本页行（apply_rows 复用）+ 状态摘要（摘要在刷新后写，不被覆盖）。"""
         if error:
@@ -551,7 +714,10 @@ class ZonePage(QWidget):
         """每次新构建（不缓存实例 → 无悬挂 QMenu，坑 7 幂等）。"""
         menu = QMenu(self)
         if self.zone == "candidate":
-            menu.addAction("标为喜欢")
+            like_action = menu.addAction("标为喜欢")
+            like_action.triggered.connect(
+                lambda: self.move_selected_book_to_liked(
+                    self._table.currentIndex().row()))
             menu.addAction("不合口味")
         else:
             menu.addAction("移到候选池")
