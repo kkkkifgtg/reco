@@ -273,3 +273,12 @@
 - ⑤ 分支已删/worktree 已清/隔离审计目录清零（ALL-CLEAN）。
 - 收官结论：audit-log 18 条全闭环（W1-W14+12b+W15/W16/W17/W18+修复票 W5-F/W6-A/W5-N+双轴评审），五类检查点无未关闭 blocker，PR-first 全程无一违规直改。**团队任务流收官——后续改进另开团队（用户指令），本审计员不新增任何改进项。**
 
+## 2026-11-21T12:25+0800 G2（reco-next t4 真 PR 双闸门基线）审计 — PASS（PR #1 实弹闭环，第 19 条起为新流程条目）
+
+- 对象：4f4c047 @ chore/g2-pr-baseline（1 文件 +59：.scratch/reco-impl/G2-PR-BASELINE.md 就位报告；auditor 独立审计，非转述）。
+- 门位清单全部实证：gh 2.105.0 auth = kkkkifgtg Active（keyring token，scopes gist/read:org/repo/workflow）；origin = kkkkifgtg/reco（PRIVATE，default branch master）；fetch 后本地 master 5e179d4 与 origin/master ahead 0 / behind 0；共享检出净树（0 脏项）；gh pr list --state all 为空 → 本 PR 为仓库第 1 张真 PR。
+- 双闸门：PR #1 Audit Trail 区双结论 merge 前留痕——本条为 auditor 结论（PASS），test-runner 结论见 PR #1 页面评论；两条齐且 pass 方可 merge。
+- 本审计条目随 PR #1 本身入库——新流程首个「审计记录随 PR 落 master」闭环；此后每票审计条目关联 PR 链接。
+- 遗留观察（不阻断）：① bash PATH 无 gh（command not found），统一全路径 D:/Program Files/GitHub.cli/gh.exe；② git identity = reco-builder（团队共享提交身份，与 gh 账号 kkkkifgtg 分离属预期）；③ harness create_worktree 工具因缺 node 子进程不可用，隔离副本改用 git worktree add 原生命令（分支写操作断言照执行）。
+
+
