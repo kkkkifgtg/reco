@@ -36,6 +36,8 @@ QPushButton:pressed {{ background: {BG}; }}
 QPushButton#primary {{ background: {ACCENT}; color: #ffffff; border: none; }}
 QPushButton#primary:hover {{ background: #3f78e0; }}
 QPushButton#danger {{ background: transparent; color: {DANGER}; border: 1px solid {DANGER}; }}
+QPushButton:pressed {{ background: #3a3d42; padding-top: 9px; }}
+QPushButton#primary:pressed {{ background: #2f66c0; padding-top: 9px; }}
 QLineEdit, QSpinBox {{
     background: {SURFACE}; color: {TEXT};
     border: 1px solid {OVERLAY}; border-radius: {RADIUS_SM}px;
@@ -49,6 +51,9 @@ QListWidget, QTableView, QScrollArea {{
 QListWidget#nav {{ border: none; background: transparent; }}
 QListWidget::item {{ padding: 8px; border-radius: {RADIUS_SM}px; }}
 QListWidget::item:selected {{ background: {SURFACE}; color: {TEXT}; }}
+QListWidget::item:selected:!active {{ color: {TEXT_DIM}; }}
+QListWidget::item:selected:active {{ background: {ACCENT}; color: #ffffff; }}
+QTableView:!active {{ selection-background-color: {OVERLAY}; }}
 QTableView {{ gridline-color: {OVERLAY}; selection-background-color: {SURFACE}; selection-color: {TEXT}; }}
 QHeaderView::section {{
     background: {SURFACE}; color: {TEXT_DIM};

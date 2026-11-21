@@ -369,9 +369,11 @@ class ZonePage(QWidget):
 
     W16：右上角「打开文件夹」（F2）+ 候选页专属「开始推荐」（F3，
     完成后由主窗切到推荐专区页）；setAcceptDrops 拖拽导入（F1，切片 2）。
+    W18 U2：加载中可见反馈 + 失败「重试」入口（mark_failed 不再是死页）。
     """
 
     recommend_requested = pyqtSignal()  # F3：candidate 页「开始推荐」点击
+    reload_requested = pyqtSignal()     # U2：「重试」按钮 → 主窗重新发起加载
 
     def __init__(self, zone: str, store=None, parent=None, *, data_root=None) -> None:
         super().__init__(parent)
@@ -394,6 +396,11 @@ class ZonePage(QWidget):
         layout.addWidget(self._status)
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
+        self.btn_retry = QPushButton("重试")  # W18 U2：失败后可见可点（默认隐藏）
+        self.btn_retry.setObjectName("primary")
+        self.btn_retry.clicked.connect(lambda: self.reload_requested.emit())
+        self.btn_retry.hide()
+        btn_row.addWidget(self.btn_retry)
         self.btn_open_folder = QPushButton("打开文件夹")
         self.btn_open_folder.clicked.connect(self._open_folder)
         btn_row.addWidget(self.btn_open_folder)
@@ -402,6 +409,11 @@ class ZonePage(QWidget):
             self.btn_recommend.clicked.connect(self.recommend_requested.emit)
             btn_row.addWidget(self.btn_recommend)
         layout.addLayout(btn_row)
+
+    def mark_loading(self) -> None:
+        """W18 U2：加载中可见反馈——立即清「重试」并显示进行中状态。"""
+        self._status.setText("加载中…")
+        self.btn_retry.hide()
 
     def _open_folder(self) -> None:
         """「打开文件夹」按钮（W16 F2）：data_root + zone 映射，ensure_zones 创建。"""
@@ -460,21 +472,24 @@ class ZonePage(QWidget):
             with perf_span(f"ui.load.{self.zone}"):
                 rows = zone_page_rows(self._store, self.zone)
         except TimeoutError as exc:
-            self._status.setText(f"加载超时：{exc}")
+            self.mark_failed(f"加载超时：{exc}")
             return
         self._model.set_rows(rows)
         self.loaded = True
         self._status.setText("已加载")
+        self.btn_retry.hide()
 
     def apply_rows(self, rows) -> None:
         """worker 回调装填（UI 线程：只渲染）。"""
         self._model.set_rows(rows)
         self.loaded = True
         self._status.setText("已加载")
+        self.btn_retry.hide()
 
     def mark_failed(self, message: str) -> None:
-        """失败不置「已加载」，提示可重试（坑 3）。"""
+        """失败不置「已加载」，亮出「重试」按钮（W18 U2：不再是死页）。"""
         self._status.setText(f"加载失败（可重试）：{message}")
+        self.btn_retry.show()
 
     def row_count(self) -> int:
         return self._model.rowCount()
