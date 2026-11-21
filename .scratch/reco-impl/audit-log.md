@@ -273,6 +273,21 @@
 - ⑤ 分支已删/worktree 已清/隔离审计目录清零（ALL-CLEAN）。
 - 收官结论：audit-log 18 条全闭环（W1-W14+12b+W15/W16/W17/W18+修复票 W5-F/W6-A/W5-N+双轴评审），五类检查点无未关闭 blocker，PR-first 全程无一违规直改。**团队任务流收官——后续改进另开团队（用户指令），本审计员不新增任何改进项。**
 
+## 2026-11-21T13:15+0800 W19（N2 我喜欢真移动，bf69cdc @ feat/19-real-move，PR #26）审计 — PASS（建议可 merge，附 merge 顺序协调）
+
+- 对象：39e1128（红相契约测试）+ bf69cdc（实现 5 文件 +648/-7：store.py 投影 8± + test_file_moved_zone 44 + app.py 81± + pages.py 170± + test_move_like 352；auditor 独立审计，非转述）。方法：git worktree add --detach 隔离副本（wt-pr26-audit @ bf69cdc，基 e55ae06），零共享检出污染。
+- ① os.replace 裁定复核（队长问）：**裁定成立**。W3 落位=导入时动作（硬链接/复制、源保留、zone=落位目标）；N2 zone 变更=同一份实体改归属（源必须消失，否则文件同现 candidate/ 与 liked/ 两专区，zone 语义破坏——CONTEXT.md 落位/正样本条款）。os.replace 同卷目录项原子操作；目标专区恒为 data_root 子目录（_makedirs_zone 单根构造）→ 恒同卷，无跨卷 EXDEV 场景，无须 W3 复制兜底；冲突确定性改名 book(1).txt 对齐 W3 _conflict_free_name 语义且不覆盖既有文件（专测断言）。无更优方案：place_by_hardlink 留源破坏 zone 归属；两段式删+写破坏原子性。
+- ② COALESCE 向后兼容（对照 W13 verify_replay 语义）：**成立**。zone 变更与路径变更同一事件同一事务；无 zone 键旧事件 COALESCE 保持 zone 不变（test_file_moved_without_zone_keeps_zone 钉死）；_apply_event 仍单点实现，rebuild 逐位确定性重放不漂移（ADR-0003）。M2 语义变异（zone 参数恒 None）→ 恰 6 failed 全部 zone 同步语义测试、向后兼容测试保持绿——敏感精确指向 delta。
+- ③ 路径隔离：**成立**。「不合口味」→ record_feedback 负样本（文件与 zone 不动，专测断言）；「标为喜欢」→ move_book_to_liked 真移动（like 分支在 _send_feedback 提前 return，不经 FeedbackWorker）；liked 页无「标为喜欢」菜单。三路径零交叉。
+- ④ B 类：**通过**。file_moved payload 恰四键 path/new_path/zone/st_ino 全在白名单扫描/文件身份组（store.py:99-103），无正文；失败报错仅路径/errno（W3 文件名先例）；夹具全合成正文；SyncResult/状态文案数值枚举。
+- ⑤ A6：**通过**。grep sorted(/.sort( 在 pages.py/app.py 零命中；推荐页移动完成 → rank_candidates 共享装配重放（_on_like_move_done），零第二排序；candidate/liked 行刷新走 zone_page_rows 重查（行随 zone 实况走）。
+- ⑥ 失败诚实与幂等：os.replace 失败 → worker 捕获报错、零事件、行保留可重试（monkeypatch disk full 专测）；源不在 from_zone → no-op 零副作用；推荐行无源文件 → 诚实降级不移动不猜映射（present=0 专测）；已迁移书重复点击 → 幂等 no-op 不重复落事件（专测断言 evs==["file_added"]）。UI 池线程（LikeMoveWorker + _ACTIVE_MOVES 注册表防线），文件移动+落库均不在 UI 线程（§11.1）。
+- ⑦ 隔离全量：430 passed in 18.12s（基座 e55ae06 的 418 + 本票 12 新测，零回归）；E2 变异两发：M1 删 SQL zone 子句 7 failed（文本级），M2 zone 参数恒 None 恰 6 failed（语义级，兼容面保持绿）；恢复后净树复核 0 脏项。
+- 写域核对：5 文件与声明精确一致（store 投影 + UI 移动面 + 双测试文件），无跨域改动。
+- PR 页面留痕：本条（第 21 条）随 PR #26 分支入库（审计记录随 PR 落 master，沿 PR #1/#15 先例）；auditor 签名落 PR 正文 Audit Trail 区。
+- 遗留观察（不阻断，5 条）：① like 语义从行为信号转 zone 归属——GUI 不再产出 kind=like 行为信号（正样本身份由 zone=liked 承接，CONTEXT.md 口径自洽）；但 W10 行为权重消费面若依赖 like 信号需后续票确认收敛口径（CLI 侧不受影响）；② PR #15 与 #26 对 store.py file_moved 同一 hunk 各自实现同一 COALESCE 扩展（基点同 e55ae06）——两 PR merge 必冲突，需队长裁定 merge 顺序并让后 merge 方 rebase（建议先 #15 后 #26，#26 rebase 后复跑全量）；③ move_book_to_liked 以 display_name 匹配解析 book_id 仅作存在性检查（事件按 src path 定位，投影不受误配影响）；推荐源回退探测 liked/<display_name> 在同名异书边缘可探到他人文件（低概率，低危）；④ RECO_DISABLE_MOVE_EVENT 环境开关为逆向验证便利（默认关）入生产码——测试惯用 monkeypatch，此为第二机制，小异味；⑤ 推荐页移动后 recommend rank 即时重算，但 candidate→liked 移动不触发 recommend 页刷新（与 PR #15 观察②同族，数据无损仅展示延迟）。
+
+
 ## 2026-11-21T12:25+0800 G2（reco-next t4 真 PR 双闸门基线）审计 — PASS（PR #1 实弹闭环，第 19 条起为新流程条目）
 
 - 对象：4f4c047 @ chore/g2-pr-baseline（1 文件 +59：.scratch/reco-impl/G2-PR-BASELINE.md 就位报告；auditor 独立审计，非转述）。
