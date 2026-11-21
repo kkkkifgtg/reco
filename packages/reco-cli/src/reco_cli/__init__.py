@@ -10,7 +10,7 @@ __all__ = ["main"]
 
 __version__ = "0.2.0"
 
-_SUBCOMMANDS = ("report", "scan", "recommend", "feedback", "explain", "replay", "eval")
+_SUBCOMMANDS = ("report", "scan", "extract", "recommend", "feedback", "explain", "replay", "eval")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -25,6 +25,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("scan", help="扫描专区并输出快照")
     p.add_argument("root")
     p.add_argument("--db", default=None)
+
+    p = sub.add_parser("extract", help="批量特征提取 → 向量（事件流投影）")
+    p.add_argument("--db", required=True)
+    p.add_argument("--limit", type=int, default=None, help="最多处理的书籍数（默认全部）")
 
     p = sub.add_parser("recommend", help="推荐列表（rank 唯一入口）")
     p.add_argument("--db", required=True)
@@ -77,6 +81,8 @@ def main(argv: list[str] | None = None) -> int:
         return app.cmd_report(ns.db, write=ns.write, reports_dir=ns.reports_dir)
     if ns.command == "scan":
         return app.cmd_scan(ns.root, db=ns.db)
+    if ns.command == "extract":
+        return app.cmd_extract(ns.db, limit=ns.limit)
     if ns.command == "recommend":
         return app.cmd_recommend(ns.db, as_json=ns.json)
     if ns.command == "feedback":
