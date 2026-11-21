@@ -64,9 +64,9 @@ def test_identity_from_os_stat_follow_symlinks_false(tmp_path):
 def test_non_text_files_ignored_names_only(tmp_path):
     _write(tmp_path, "liked", "a/one.txt", b"1")
     _write(tmp_path, "liked", "a/song.mp3", b"m")
-    _write(tmp_path, "candidate", "notes.PDF", b"p")
+    _write(tmp_path, "candidate", "notes.png", b"p")  # W17：.pdf 已入白名单，忽略样例换真非文本扩展
     result = scan_zones(tmp_path)
-    assert result.ignored == ("notes.PDF", "song.mp3")
+    assert result.ignored == ("notes.png", "song.mp3")
     assert len(result.fingerprints) == 1
     for name in result.ignored:
         assert "/" not in name and "\\" not in name  # 只文件名，不带路径

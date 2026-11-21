@@ -424,6 +424,59 @@ def _epub_text(path) -> str:
         return "\n\n".join(parts)
 
 
+def _docx_text(path) -> str:
+    """DOCX：stdlib zipfile + XML 提取 word/document.xml 的 w:t 文本（零第三方依赖）。
+
+    w:p 段落边界保留换行；正文在单一 document.xml 内，段序即文档序。
+    坏 zip → BadZipFile 由 extract_features 外层统一降级 corrupt_container。
+    """
+    from xml.etree import ElementTree as ET
+
+    with zipfile.ZipFile(path) as zf:
+        root = ET.fromstring(zf.read("word/document.xml"))
+    paragraphs: list[str] = []
+    for p in root.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"):
+        runs = [
+            t.text or ""
+            for t in p.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t")
+        ]
+        paragraphs.append("".join(runs))
+    return "\n\n".join(paragraphs)
+
+
+def _pdf_text(path) -> str:
+    """PDF：pypdf 延迟导入（W8 sklearn 先例，import reco_io 零 pypdf 成本）。
+
+    加密且空密码解不开 → ValueError；无文本层 → 空串（按 empty 口径降级）。
+    """
+    try:
+        from pypdf import PdfReader  # 函数内延迟导入
+    except ImportError as exc:
+        raise RuntimeError("pypdf 未安装：PDF 支持需要 pypdf（见 wheels/ 缓存）") from exc
+
+    try:
+        reader = PdfReader(path)
+        if reader.is_encrypted:
+            reader.decrypt("")  # 空密码尝试：失败按 undecodable 降级
+        parts = []
+        for page in reader.pages:
+            parts.append(page.extract_text() or "")
+        return "\n".join(parts)
+    except Exception as exc:
+        # pypdf 异常族（PdfReadError/空密码失败/结构损坏）统一归一为
+        # ValueError——extract_features 外层按 undecodable 口径降级，不瞎填。
+        raise ValueError(f"pdf unreadable: {type(exc).__name__}") from None
+
+
+# 读取器接缝（W17）：suffix -> 纯读取函数（路径→纯文本，零落盘零输出）。
+# 新格式 = 加一个条目；统计口径不随读取器扩展变化（EXTRACTOR_VERSION 不 bump）。
+_READERS: dict[str, Callable] = {
+    ".epub": _epub_text,
+    ".docx": _docx_text,
+    ".pdf": _pdf_text,
+}
+
+
 def _degraded(flag: str) -> FeatureResult:
     return FeatureResult(
         extractor_version=EXTRACTOR_VERSION,
@@ -503,8 +556,9 @@ def _extract_features_impl(path, *, oversized_threshold_bytes, chunk_bytes, budg
     start = time_provider()
     streamed = size > oversized_threshold_bytes
     try:
-        if path.suffix.lower() == ".epub":
-            text = _epub_text(path)  # BadZipFile/UnicodeDecodeError 由外层统一降级
+        reader = _READERS.get(path.suffix.lower())
+        if reader is not None:
+            text = reader(path)  # BadZipFile/UnicodeDecodeError 由外层统一降级
             status = _feed_text(acc, text, chunk_bytes=chunk_bytes, start=start,
                                 budget_seconds=budget_seconds, time_provider=time_provider)
         else:
@@ -521,6 +575,10 @@ def _extract_features_impl(path, *, oversized_threshold_bytes, chunk_bytes, budg
         return _degraded("undecodable")
     except zipfile.BadZipFile:
         return _degraded("corrupt_container")
+    except ValueError:
+        # 读取器族统一降级（W17）：_pdf_text 把 pypdf 异常族归一为 ValueError
+        # （加密/结构损坏/空密码解不开）——按 undecodable 口径降级，不瞎填。
+        return _degraded("undecodable")
 
     if status == "timeout":
         stats, _buckets = acc.finish()  # 部分真值；buckets 未完成不给
