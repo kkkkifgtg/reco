@@ -13,6 +13,7 @@ from PyQt6.QtCore import (
     Qt,
     QThreadPool,
     QTimer,
+    QUrl,
     pyqtSignal,
 )
 from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPalette, QPixmap

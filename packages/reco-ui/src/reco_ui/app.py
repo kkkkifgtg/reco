@@ -35,6 +35,10 @@ from reco_ui.theme import apply_dark_theme
 # 分级超时（§11.2 坑 1）：worker 内 zone 查询墙钟上限（慢库不冻结 UI）。
 _LOAD_LIB_MS = 200.0
 
+# W16：数据根目录配置（用户可经 config 注入覆盖；当前默认目录可能不存在，
+# 「打开文件夹」时由 ensure_zones 创建——F2 契约）。
+DEFAULT_DATA_ROOT = "F:/date/adult-reco/data"
+
 PAGE_ORDER = ("liked", "candidate", "recommend", "profile")
 PAGE_LABELS = {
     "liked": "喜欢专区",
@@ -70,9 +74,10 @@ class MainWindow(QMainWindow):
 
     page_requested = pyqtSignal(str)
 
-    def __init__(self, store=None, parent: QWidget | None = None) -> None:
+    def __init__(self, store=None, parent: QWidget | None = None, config=None) -> None:
         super().__init__(parent)
         self._store = store
+        self._data_root = dict(config or {}).get("data_root", DEFAULT_DATA_ROOT)  # W16 配置注入
         self._pages: dict[str, PagePlaceholder] = {}
         self._inflight: set[str] = set()  # 坑 2：in-flight 去重
         self._preloader = None  # W12b：骨架构建完成后在 _build_skeleton 末尾启动
@@ -92,7 +97,7 @@ class MainWindow(QMainWindow):
             if pid == "recommend":
                 page = RecommendPage(self._store)  # 真实推荐页（切片 2 接线）
             elif pid in ("liked", "candidate"):
-                page = ZonePage(pid, self._store)  # 真实板块页（切片 3）
+                page = ZonePage(pid, self._store, data_root=self._data_root)  # 板块页（W16 F1/F2）
             elif pid == "profile":
                 page = ProfilePage(self._store)  # 真实画像页（切片 4）
             else:
@@ -113,6 +118,8 @@ class MainWindow(QMainWindow):
         side_layout.setContentsMargins(8, 8, 8, 8)
         side_layout.addWidget(self._nav)
         side_layout.addStretch(1)
+        # W16 F3：候选页专属「开始推荐」→ 触发 RankLoader（W13 生产接线复用）+ 切页
+        self._pages["candidate"].recommend_requested.connect(self._start_recommend)
         body = QWidget()
         body_layout = QHBoxLayout(body)
         body_layout.addWidget(side, 0)
@@ -200,6 +207,11 @@ class MainWindow(QMainWindow):
             return
         page.apply_profile(data)
         page.loaded = True
+
+    def _start_recommend(self) -> None:
+        """W16 F3：「开始推荐」→ RankLoader（W13 生产接线复用）+ 自动切推荐专区页。"""
+        self._start_load("recommend")
+        self._nav.setCurrentRow(2)
 
     def _on_zone_loaded(self, page_id: str, rows) -> None:
         """worker 完成 → UI 线程渲染；「已加载」仅在成功后置位（坑 3）。"""
@@ -323,15 +335,22 @@ class RecommendPage(QWidget):
 
     page_id = "recommend"
 
-    def __init__(self, store=None, parent=None) -> None:
+    def __init__(self, store=None, parent=None, *, data_root=None) -> None:
         super().__init__(parent)
         self._store = store
+        self._data_root = data_root
         self.loaded = False
         self._model = RankTableModel()
         layout = QVBoxLayout(self)
         title = QLabel("推荐专区")
         title.setObjectName("page-title")
         layout.addWidget(title)
+        # W16 F2：推荐专区页同样有「打开文件夹」（zone=推荐专区 映射）
+        open_row = QHBoxLayout()
+        open_row.addStretch(1)
+        self.btn_open_folder = QPushButton("打开文件夹")
+        open_row.addWidget(self.btn_open_folder)
+        layout.addLayout(open_row)
         gen_row = QHBoxLayout()
         gen_label = QLabel("生成篇数")
         gen_label.setObjectName("dim")
