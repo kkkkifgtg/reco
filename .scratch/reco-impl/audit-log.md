@@ -222,3 +222,17 @@
 - 终审结论：五类全量（A 边界互穿/B 正文泄漏/C 契约/D manual/E 自洽）无未关闭 blocker；14 票审计记录完整闭环；**建议 merge feat/14-swap-drill 收官，项目交付就绪**。
 - 交付后备忘：3 处 if False else 死分支收尾票、_last_status 多线程复核（票 12 已裁定）、isolated-install 升格 CI、uv/hatchling 离线补齐——全部在 RETRO 未竟移交清单，不阻断交付。
 
+
+## 2026-11-21T10:35+0800 W16（交付后迭代：GUI 导入三功能，双提交）审计 — PASS（建议可 merge）
+
+- 对象：6462809（F2/F3 切片1：app.py 25 + pages.py 53 + test 124）+ 2e0cbe0（F1 拖拽切片2：pages.py 127 + qt.py QUrl + test 128）；基点 7718c8c（W15 图标 merge）正确，reflog 干净，范围 4 文件 +453/-5 写域精确（reco-ui 单包）。方法：git archive 隔离副本审计 tip。
+- ① payload 同构契约：**达成+重放**。ImportWorker.file_added payload 与 store.py:421 file_added 投影逐字段对齐（path=落位产物实际路径/zone/ext/size_bytes/mtime_ns/st_dev/st_ino/display_name/normalized_name/dedup_key）；st_dev/st_ino 取自 PlacementResult.dst.stat()（产物 stat——扫描器后续按身份配对不重复建 book，队长契约补充成立）。E2 重放（auditor）：payload.path 改为源路径 → 恰 1 failed（test_import_places_file_and_persists_file_added:207 产物路径断言）→ 恢复 53 passed。
+- ② place_by_hardlink 契约：**经公共 API 复用零复制**——EXDEV 退复制/指纹判等（test_import_twice SKIPPED 不重复落库）/权限上抛语义全部由 W3 原生实现承担，GUI 不重实现。
+- ③ 白名单拒绝路径：dragEnterEvent 预筛（目录/非法扩展 ignore）+ drop 拒绝计数（test_import_rejects：exe+目录 → 零落位零落库+状态「拒绝 2」）双层在位；ALLOWED_IMPORT_EXTS 与扫描侧 TEXT_EXTS 同口径。
+- ④ F2 票面假设修正：**与 W2 源码/§8.1 一致**。scanner.ensure_zones 刻意不建目录（§8.1 避免猜用户意图，W2 审计已锚定）；open_zone_folder 文档明示「用户点击本身就是意图，创建在本函数完成（root/专区层 mkdir）再调 ensure_zones 走校验契约」——语义分层清晰，测试覆盖（点按钮→目录创建+startfile 断言）。
+- ⑤ A6：F3 开始推荐 = candidate 专属按钮 → recommend_requested → _start_recommend → _start_load("recommend") 复用 W13 RankLoader 生产接线 + 自动切页——零第二排序，与 W13 逐位一致契约直接兼容。
+- ⑥ 坑 2 去重：test_start_recommend 显式在预载 in-flight 期间清空模拟完成后再点击——去重语义的测试构造合理。
+- ⑦ B 类：新 UI 面零正文（status 摘要只有计数、表格列仍是 book_id/名称/大小、payload 全数值/路径/枚举）；_ACTIVE_IMPORTS 注册表防线沿用（17eceaf 同款）。
+- 隔离全量：390 passed in 12.37s（384 基线 + W16 12 新测试 - W14 遗留口径修正）；UI 子套件 53 passed。
+- 遗留观察（不阻断）：① data_root 默认 F:/date/adult-reco/data 可 config 注入覆盖——目录不存在由 F2 点击创建（契约自洽）；② ImportWorker 异常整体吞为 error 字符串（UI 只收字符串惯例），单文件 place 失败会中断整批（后续迭代可考虑逐文件容错）；③ os.startfile 仅 Windows——open_zone_folder 在非 Windows 无 startfile 属性（项目 Windows-only 口径内无碍）。
+

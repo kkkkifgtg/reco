@@ -224,3 +224,14 @@ reco-ui
 - ⑥RV 总扫：ACCEPTANCE.md #23 逆向记录全列（W4×6/W5×2/W6×2/W7×3/W8×4/W9×7/W10×5/W12b×打断重试/W13×1+快照/W14 换核红转绿明细）；13-reverse-verify.py 在位（bytes 级恢复+干净树前置）。本测试员十二票验收累计亲手重放变异 20+ 全部红→绿闭环。
 - 全验收清单 24 项逐条打勾（docs/ACCEPTANCE.md）+ CODING-STANDARDS 首版 + RETRO 收官 + pre-commit-guard 入库。
 - 终验结论：六项全过，W14 放行——reco 项目 15 张实现票（00-14+12b+12）全部验收 PASS，交付前获准点成立。
+### 2026-11-21T10:35+0800 W16（工单16 导入 UX：F1 拖拽/F2 打开文件夹/F3 开始推荐）正式验收记录 — PASS（两提交 6462809+2e0cbe0 @ feat/16-import-ux）
+
+独立复核证据（test-runner，detached worktree@2e0cbe0 + offscreen + PYTHONPATH=worktree src 口径）：
+- ①396 对账：384+12 吻合（test_import_ux 12 测试），全量 EXIT=0；口径与队长提示一致（裸跑 12 failed 为 editable .pth 伪影，未采信）。性能无回归：150 行/首帧 3 测试 targeted PASSED。
+- ②拖拽导入端到端（真实 W3 落位链）：place_by_hardlink 落位产物实存于专区目录 + file_added 落库 payload 与 scan 同构（path=专区产物实际路径、(size,mtime_ns,st_dev,st_ino) 四元组与 placed.stat() 全等、dedup_key 非空）+ 表格刷新 row_count==1；重拖同文件 → SKIPPED 指纹判等 → files 行数仍 1 + 状态「跳过」计数。拖拽在池线程 ImportWorker（UI 零阻塞）。
+- ③非法拒绝：.exe 与目录拖入 → 不落位不落库（files=0）+ 状态「拒绝 2 项」；dragEnter 白名单预筛（合法接受/非法忽略）断言在位。
+- ④F2 startfile：monkeypatch 断言参数=专区映射路径（calls==[tmp/liked]）+ ensure_zones 先创建目录断言（前置不存在→点击后 is_dir）+ opener 注入点独立测试（三专区映射 calls 全等）。DEFAULT_DATA_ROOT 配置注入链测试（config 覆盖/缺省回退）。
+- ⑤F3：candidate 专属按钮（liked 无 btn_recommend）+ FakeRankLoader 断言触发 1 次 + 自动切页 nav.currentRow==2 + in-flight 去重语义（首屏预载期清理后触发）。
+- ⑥逆向重放 3 变异（全红→绿闭环）：A dragEnter 白名单失效（全放行）→ test_drag_handlers 恰 1 failed → 复原绿；B startfile 注入点去除→1 passed 假红（该测试经 pages.os.startfile monkeypatch 覆盖，行为等价——注入点另有独立测试覆盖，记为覆盖冗余观察非缺陷）；B' ensure_zones 校验删除→1 passed（mkdir 显式先行保证断言面，ensure_zones 属 W2 校验契约层——断言边界注记，mkdir 语义由独立断言保护）；C SKIPPED 计数失效（重复导入视为导入）→ test_import_twice 恰 1 failed → 复原 12 绿。
+- 提交范围：4 文件 453 行全在 reco-ui scope（app/pages/qt/test_import_ux）。分支历史上另有 icon 两提交（7718c8c/3215a03）已先期入 master，不在本票范围。
+- worktree 已移除，主检出与各 worktree 零扰动。
