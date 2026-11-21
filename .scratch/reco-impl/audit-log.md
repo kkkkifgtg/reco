@@ -250,3 +250,26 @@
 - 隔离全量：411 passed in 15.61s（独立复现，与 implementer-4 报告一致）。
 - 遗留观察（不阻断）：① test_formats_w17.py make_pdf 工厂 51-57 行有死代码（empty_layer 分支重赋 writer 后循环体为空、注释自述「简化」——行为正确但属坏味道，建议随手清理或收尾票）；② RTF 移交记录在案（.scratch/reco-impl/notes/rtf-handoff.md，正则剥控制字对 \uN 有损违背不瞎填、striprtf 超时间盒——口径文档已追加 W17 节）；③ 加密 docx 用非 zip 魔数模拟（真实加密 docx 是 OLE 容器）——降级路径语义等价，注释已如实披露模拟形态。
 
+
+## 2026-11-21T11:30+0800 W18（交付后迭代：UX 修复批次，3 提交链 @ feat/18-ux-fix，R18 取消并入 R-CLOSE 一并归档）审计 — PASS（随 R-CLOSE 终验确认）
+
+- 对象：134e7f8（修复主体 5 文件 +238）+ 05c4c5a（W16 inflight 测试适配新口径）+ c797488（U3 断言收紧）；基点 095cc72 正确；已 merge 15700df。方法：git archive 隔离副本（R18 在途取证由 R-CLOSE 收口确认）。
+- ① U1 黑控制台：bat 重构双分支——默认 pythonw.exe 无控制台；python.exe 分支由 RECO_PERF/RECO_PERF_TABS 守卫（打点走 stdout）。测试逐行断言（启动行含 pythonw、python.exe 行必须带守卫环境变量）钉死。
+- ② U2 候选页无响应根治：**排障纪律合格**（先造能红的复现：SlowStore 0.3s 在旧 200ms 下必超时→死页；根因=阈值过激非 in-flight 吞点击——排查方向 a 被证据否决并披露）；修复三件套=_LOAD_LIB_MS 200→1500ms + mark_loading 点击即反馈「加载中…」+ mark_failed 亮出「重试」按钮（reload_requested→_start_load，死页出口）；BrokenStore 专测重试机制；坑 2 原语义未破坏（in-flight 去重保留，W16 测试适配断言「不停在加载中」由新口径自然成立）。
+- ③ U3 按下态：通用 QPushButton:pressed 增强（#3a3d42 加深一档+padding-top 9px 位移）+ #primary 专属 #2f66c0 + 导航 :active/:!active 双态 + QTableView:!active；两帧截图对照测试（up/pressed 文件大小差异断言）；c797488 断言收紧钉住通用规则（RV 盲区#primary 假绿教训）。
+- ④ U4 重绘守卫：静态守卫禁 .repaint( 与 FullViewportUpdate（Qt 视图默认双缓冲，无整窗重绘点）；耗时反馈由 U2 状态行承担。
+- 四项 red→green→逆向闭环：M_U1（启动行退 python.exe）/M_U2（重试按钮藏回）/M_U3（删按下块）自报全红；auditor E2 重放 M_U3：**首轮变异无效如实弃用**（sed 单花括号未命中 f-string 双花括号源行——W12b M3 教训重演），修正后删除源行 → test_qss_has_pressed_state 恰 1 failed（:149）→ 恢复 7 passed。三轮 RV 盲区（bat 注释行命中/#primary 假绿/多行 sed）教训已入票注记。
+- 隔离全量（tip）：403 passed ×2 连跑（implementer 自报）+ auditor 快照 403 口径复核；merge 后 master 全量见 R-CLOSE 条目（418）。
+- 遗留观察（不阻断）：_LOAD_LIB_MS 1500ms 为经验值（真实库规模再增长时需复评，失败路径已有重试兜底）。
+
+
+## 2026-11-21T11:35+0800 R-CLOSE（t30 收口终验：W17+W18 双 merge 后 master 终态）— PASS（任务流收官）
+
+- 终态：master 15700df（W17 a58520b + W18 15700df 双 merge 在位）；feat/17*/feat/18* 分支已删；共享检出脏项仅未跟踪审计产物；store.py:114 vector_blob_hex + W5-N 契约注释在位（键名收口保持）。
+- ① 全量 418 独立复现：418 passed in 15.39s（隔离快照 + PYTHONPATH src + offscreen，与队长口径一致）。
+- ② W17 四态抽验（auditor 独立探针）：docx 损坏→BadZipFile→corrupt_container ✓；pdf 损坏→undecodable ✓；docx 正常→ok ✓；金丝雀「读取文本含金丝雀=True / 结果 JSON 含金丝雀=False」——**零泄漏精确成立**；TEXT_EXTS 五扩展收口 ['.docx','.epub','.md','.pdf','.txt'] ✓。
+- ③ W18 四项 UX 终验：U1 bat 双分支守卫（测试逐行钉死+静态核验）✓；U2 根因修复+复现纪律+重试机制（mark_failed→btn_retry.show 实现确认+BrokenStore 专测）✓；U3 pressed 块实存（theme.py grep 计数 2：通用+primary）+截图对照测试 ✓；U4 守卫 grep 零命中（.repaint(/FullViewportUpdate 全仓 UI 源码无）✓。四项 red→green→逆向闭环（auditor M_U3 修正重放恰 1 failed :149）。
+- ④ audit-log 第 17 条（R17）在案；第 18 条（W18，R18 取消并入本票一并归档）随本条落盘。
+- ⑤ 分支已删/worktree 已清/隔离审计目录清零（ALL-CLEAN）。
+- 收官结论：audit-log 18 条全闭环（W1-W14+12b+W15/W16/W17/W18+修复票 W5-F/W6-A/W5-N+双轴评审），五类检查点无未关闭 blocker，PR-first 全程无一违规直改。**团队任务流收官——后续改进另开团队（用户指令），本审计员不新增任何改进项。**
+
