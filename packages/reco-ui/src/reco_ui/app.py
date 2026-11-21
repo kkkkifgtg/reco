@@ -458,10 +458,18 @@ def run_tabs(win: "MainWindow", snapshot_path: str | None = None) -> int:
 
 
 def run(argv=None) -> int:
-    """事件循环入口；集中 QSS 在此挂载（美观不阻塞首帧骨架）。"""
+    """事件循环入口；集中 QSS 在此挂载（美观不阻塞首帧骨架）。
+
+    W18b：生产入口必须挂真实 Store（默认 db=项目根 reco.db）——
+    store=None 时 _start_load 早退，专区页将永远停在「待加载」（用户实测 bug）。
+    """
     app = QApplication.instance() or QApplication(argv or [])
     apply_dark_theme(app)
-    win = MainWindow()
+    _default_db = Path(__file__).resolve().parents[3] / "reco.db"
+    from reco_store import open_store as _open_store
+
+    _store = _open_store(_default_db)
+    win = MainWindow(store=_store)
     win.resize(1080, 720)
     win.show()
     return app.exec()
