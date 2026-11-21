@@ -171,14 +171,18 @@ class ImportWorker(QRunnable):
                     continue
                 st = result.dst.stat()
                 display = result.dst.name
+                from reco_io.int64 import to_int64
+
                 self._store.append_event("file_added", payload={
                     "path": str(result.dst),
                     "zone": self._zone,
                     "ext": result.dst.suffix.lower(),
                     "size_bytes": int(st.st_size),
                     "mtime_ns": int(st.st_mtime_ns),
-                    "st_dev": int(st.st_dev),
-                    "st_ino": int(st.st_ino),
+                    # N1：Windows 无符号 64 位身份 → SQLite int64（补码回绕契约），
+                    # 与 resync/导入/种子同一编码口径（契约测试 test_int64_contract）。
+                    "st_dev": to_int64(int(st.st_dev)),
+                    "st_ino": to_int64(int(st.st_ino)),
                     "display_name": display,
                     "normalized_name": normalize_book_name(display),
                     "dedup_key": dedup_key(int(st.st_size), display),
@@ -202,6 +206,47 @@ def _utcnow_iso() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat()
+
+
+class ScanSignals(QObject):
+    """N1 再扫描信号：done(zone, added, removed, moved, changed, error)。"""
+
+    done = pyqtSignal(str, int, int, int, int, str)
+
+
+class ScanWorker(QRunnable):
+    """N1 单专区目录→库再扫描 worker（池线程；UI 线程零扫描零 DB 写）。
+
+    语义实现在 reco_ui.sync.sync_zone（纯层，独立测试钉死）；本类只做
+    QRunnable 包装与异常→字符串收敛（§11.1 同款口径）。
+    """
+
+    def __init__(self, store, zone: str, data_root, *, stat_provider=None) -> None:
+        super().__init__()
+        self._store = store
+        self._zone = zone
+        self._data_root = data_root
+        self._stat_provider = stat_provider
+        self.signals = ScanSignals()
+        _ACTIVE_IMPORTS.add(self)  # 复用扫描类 worker 持活注册表（生命周期同款）
+
+    def run(self) -> None:
+        from reco_ui.sync import sync_zone
+
+        try:
+            result = sync_zone(self._store, self._zone, self._data_root,
+                               stat_provider=self._stat_provider)
+            self._emit(result.added, result.removed, result.moved, result.changed, "")
+        except Exception as exc:  # UI 只收字符串
+            self._emit(0, 0, 0, 0, f"{type(exc).__name__}: {exc}")
+
+    def _emit(self, added: int, removed: int, moved: int, changed: int, error: str) -> None:
+        try:
+            self.signals.done.emit(self._zone, added, removed, moved, changed, error)
+        except RuntimeError:
+            pass  # 接收方已销毁
+        finally:
+            _ACTIVE_IMPORTS.discard(self)
 
 
 class FeedbackSignals(QObject):
@@ -377,6 +422,7 @@ class ZonePage(QWidget):
 
     recommend_requested = pyqtSignal()  # F3：candidate 页「开始推荐」点击
     reload_requested = pyqtSignal()     # U2：「重试」按钮 → 主窗重新发起加载
+    refresh_requested = pyqtSignal()    # N1：「刷新」按钮 → 主窗发起目录→库再扫描
 
     def __init__(self, zone: str, store=None, parent=None, *, data_root=None) -> None:
         super().__init__(parent)
@@ -404,6 +450,10 @@ class ZonePage(QWidget):
         self.btn_retry.clicked.connect(lambda: self.reload_requested.emit())
         self.btn_retry.hide()
         btn_row.addWidget(self.btn_retry)
+        # N1：「刷新」在「打开文件夹」旁——目录→库再扫描落库后重查本页行。
+        self.btn_refresh = QPushButton("刷新")
+        self.btn_refresh.clicked.connect(self.refresh_requested.emit)
+        btn_row.addWidget(self.btn_refresh)
         self.btn_open_folder = QPushButton("打开文件夹")
         self.btn_open_folder.clicked.connect(self._open_folder)
         btn_row.addWidget(self.btn_open_folder)

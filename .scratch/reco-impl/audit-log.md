@@ -282,3 +282,17 @@
 - 遗留观察（不阻断）：① bash PATH 无 gh（command not found），统一全路径 D:/Program Files/GitHub.cli/gh.exe；② git identity = reco-builder（团队共享提交身份，与 gh 账号 kkkkifgtg 分离属预期）；③ harness create_worktree 工具因缺 node 子进程不可用，隔离副本改用 git worktree add 原生命令（分支写操作断言照执行）。
 
 
+## 2026-11-21T13:05+0800 RN1（N1 刷新按钮+定时自动扫描，eb51c03 @ feat/n1-refresh-autoscan，PR #15）审计 — PASS（建议可 merge）
+
+- 对象：eb51c03（9 文件 +978/-7：reco_io/int64.py 37 + int64 契约测 65 + store.py 投影 15± + 投影测 119 + app.py 111± + pages.py 54± + sync.py 174 + UI 测 183/227；auditor 独立审计，非转述）。方法：git worktree add --detach 隔离副本（wt-rn1-audit @ eb51c03），零共享检出污染，用完即 remove。
+- ① 刷新落库事件同构：**达成**。_file_added_payload 十键与 seed_books/ImportWorker/store 投影逐字段同构（path/zone/ext/size_bytes/mtime_ns/st_dev/st_ino/display_name/normalized_name/dedup_key）；内容变化收敛 file_added upsert（不逐轮重报）；file_moved 携带 zone 经 COALESCE 搬迁专区、不带 zone 保持原专区（向后兼容）；写路径全部经 store.append_event 单写者队列，零第二条写路径（sync.py 装配层 docstring 明示边界）。
+- ② st_dev/st_ino 补码回绕契约：**成立+重放**。to_int64/from_int64 幂等可逆、域外显式 ValueError；test_int64_contract 六测含边界 2^63 配对与固定种子 200 随机样本 roundtrip；test_huge_identity_encoded_as_int64_wrapped 钉落库形态；ImportWorker 拖拽导入同步切 to_int64（同一编码口径，收编 .scratch/import-data-root.py 临时实现为正式契约）。
+- ③ 定时器/UI 零阻塞：**达成**。QTimer 默认关（_auto_scan is None 断言），config["scan_interval_s"]>0 才启动；sync 走 ScanWorker 池线程（UI 线程零扫描零 DB 写，§11.1），_ACTIVE_IMPORTS 注册表防线沿用；_on_auto_scan 防重入（_auto_pending 上轮未完成跳过断言在位）；推荐页刷新 → _start_load("recommend") rank 唯一装配重绘（A6，零第二排序，test 断言 calls==["recommend"]）；专区缺目录零动作不猜意图（§8.1）。
+- ④ store 投影契约：**达成**。file_added ON CONFLICT(path) DO UPDATE（重扫幂等+墓碑复活不留鬼行+last_seen_at 推进）；file_removed 墓碑 present=0；verify_replay 逐位一致断言在位且经变异证实敏感（见⑥）。
+- ⑤ 隔离全量：445 passed in 23.38s（PYTHONPATH 快照 + offscreen；418 基线 + 27 新测试，与基线口径修正 418 实测一致）。
+- ⑥ E2 双变异重放（auditor 独立变异）：M1 拆 to_int64 回绕分支（return v 剥包裹）→ 恰 4 failed（test_huge_values_wrap_without_overflow + test_boundary_pairing_2_63 + test_huge_identity_encoded_as_int64_wrapped + test_second_sync_same_zone_roundtrips_wrapped_identity——回绕契约四测精确转红）；M2 upsert 降级 DO NOTHING → 恰 5 failed（投影语义全测转红，含 test_wrapped_identity_stored_verbatim_and_replay_ok 的回放断言）；恢复提交态后 git diff 净树复核 0 脏项。
+- ⑦ 写域核对：9 文件与声明范围精确一致（reco-io/reco-store/reco-ui 三包 + 各自测试），无跨域改动；B 类复核 SyncResult/payload/状态文案全数值枚举路径零正文；C1/C2/C13 不受影响。
+- PR 页面留痕：gh pr create 已留痕（PR #15 OPEN，正文含双签 Audit Trail 区）；本条（第 20 条）随 PR 分支入库——审计记录随 PR 落 master（沿 PR #1 先例）；merge 待双闸结论齐后执行。
+- 遗留观察（不阻断，3 条 low）：① sync_zone 每专区独立调 scan_zones 全专区扫描，定时多专区多轮重复 stat——当前规模可接受，后续可缓存单轮快照；② 刷新完成回调 _start_load("recommend") 若恰逢 rank 在途会被 inflight 去重跳过——新落库行要等下一次导航/预热才进 rank 渲染（数据已落库无损，仅展示延迟）；③ 手动刷新无去重，同专区并发双 sync 事件语义幂等（二次 upsert/no-op UPDATE 验证在案）但产生重复事件——低频手动操作可接受。
+
+
