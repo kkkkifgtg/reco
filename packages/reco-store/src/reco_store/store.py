@@ -102,7 +102,7 @@ _ALLOWED_KEYS = frozenset({
     "st_ino", "display_name", "normalized_name", "dedup_key", "mount_hint", "present",
     # 标签
     "tag_id", "axis", "label", "parent", "status", "merged_into", "created_by",
-    "source", "confidence", "basis_json", "alias",
+    "source", "confidence", "basis_json", "alias", "aliases",
     # 行为信号（不含 effective_weight——折叠时重算）
     "kind", "value", "session_id",
     # 静音持久化（工单 11：mutes 投影事件 payload）
@@ -124,8 +124,15 @@ def _validate_payload(payload: dict) -> str:
     for key, val in payload.items():
         if key in _FORBIDDEN_KEYS or key not in _ALLOWED_KEYS:
             raise PayloadViolationError(f"payload 含白名单外键: {key!r}")
-        if not isinstance(val, (str, int, float, bool)) and val is not None:
-            raise PayloadViolationError(f"payload 值必须为标量: {key!r}")
+        if val is None:
+            continue
+        if isinstance(val, (str, int, float, bool)):
+            continue
+        # RR2/t3：唯一例外 aliases——标量字符串数组（种子别名一体落库），
+        # 其余键仍必须为标量（B6 白名单纪律不放松）。
+        if key == "aliases" and isinstance(val, list) and all(isinstance(x, str) for x in val):
+            continue
+        raise PayloadViolationError(f"payload 值必须为标量: {key!r}")
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
@@ -449,6 +456,14 @@ def _apply_event(conn: sqlite3.Connection, event: Event) -> None:
             " VALUES(?,?,?,?,'active',NULL,?,?)",
             (p["tag_id"], p["axis"], p["label"], p.get("parent"), p.get("created_by"), at),
         )
+        # RR2/t3：种子别名随 tag_added 一体落库（aliases 为字符串数组；
+        # 逐条 INSERT OR IGNORE 幂等，重放同事件不重复建行）。
+        for alias in p.get("aliases") or []:
+            if str(alias).strip():
+                conn.execute(
+                    "INSERT OR IGNORE INTO tag_aliases(alias, tag_id, source) VALUES(?,?,?)",
+                    (str(alias), p["tag_id"], p.get("created_by") or "seed"),
+                )
     elif t == "tag_merged":
         conn.execute("UPDATE tags SET status='merged', merged_into=? WHERE tag_id=?", (p["into"], p["tag_id"]))
         conn.execute("INSERT OR IGNORE INTO tag_aliases(alias, tag_id, source) VALUES(?,?,?)",
@@ -549,8 +564,9 @@ def _apply_event(conn: sqlite3.Connection, event: Event) -> None:
         )
     elif t == "mute_released":
         conn.execute("DELETE FROM mutes WHERE book_id = ?", (event.book_id,))
-    elif t in ("scan_started", "scan_completed", "rec_feedback", "perf_sample", "pool_added"):
-        pass  # 记账型事件：只进事件流，不投影（pool_added 交互类，§7 隔离）
+    elif t in ("scan_started", "scan_completed", "rec_feedback", "perf_sample", "pool_added", "tag_hit"):
+        pass  # 记账型事件：只进事件流，不投影（pool_added 交互类，§7 隔离；
+        # tag_hit 口味事件由画像重放消费折叠 axis_weights，§7 数据模型）
     else:
         raise ValueError(f"未知事件类型: {t!r}")
 

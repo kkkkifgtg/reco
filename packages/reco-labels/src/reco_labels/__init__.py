@@ -5,6 +5,12 @@
 """
 from __future__ import annotations
 
+from reco_labels.auto_tag import (
+    AutoTagOutcome,
+    TAG_PROPOSE_THRESHOLD,
+    aliases_for_match,
+    auto_tag_book,
+)
 from reco_labels.coverage import Coverage, axis_coverage, axis_vector
 from reco_labels.lifecycle import (
     MergeResult,
@@ -33,8 +39,12 @@ from reco_labels.store import (
 from reco_labels.taxonomy import Taxonomy, load_taxonomy, normalize_tag
 
 __all__ = [
+    "AutoTagOutcome",
     "BookTagRow",
     "Coverage",
+    "TAG_PROPOSE_THRESHOLD",
+    "aliases_for_match",
+    "auto_tag_book",
     "Evidence",
     "EventRow",
     "InMemoryLabelsStore",

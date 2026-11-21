@@ -155,6 +155,19 @@ alias 命中即写 book_tags(auto)，新词也自动建 tags 行。
 
 ---
 
+## ⑥ 实现者补充注记（额度收尾补录，未新增检索）
+
+> 队长指示「额度即将耗尽，未落盘结论立即落盘」——以下为本轮调研已取得但未写入正文的实现级细节，全部来自已核来源，无新增调研。
+
+1. **QWebEngineView 本地文件安全限制（v2 备选必读）**：`load(QUrl::fromLocalFile(...))` 受 Chromium 安全策略限制可能白屏；须用 `setHtml(html, baseUrl)`/`setContent()`，或把资源放进 Qt 资源系统 `qrc:///` 加载。**图片相对路径解析依赖 baseUrl**——v2 原版式 EPUB 若走 WebEngine，把解包图片目录作为 baseUrl 是先决条件（来源 #17）。
+2. **PDF 进度坐标细化**：pypdf 按**页**提取（逐页 `page.extract_text()`）。reading_progress 对 PDF 建议记 `(pdf_page_index, 页内 char_offset)` 双坐标而非全文 char_offset——全文偏移需逐页拼接重建，页序号天然稳定，恢复时只需重新提取目标页±邻页，省时。可在 §④ DDL 上加 `pdf_page_index INTEGER` 列。
+3. **EPUB percent 计算需章长缓存**：percent=(前序章累计字符+章内偏移)/全书字符。打开书时一次性线性扫描 spine 各章字符数缓存（进程内即可，不必落库）；这就是 epub.js `locations.generate()` 的 v1 等价物——epub.js 生成 locations 是全书遍历的已知成本，v1 压成打开时线性扫描即可（来源 #14）。
+4. **QPlainTextEdit 分块追加的位置保持**：懒加载追加下一批块后应显式回设 `QScrollBar.setValue(旧值)`（用户在底部附近时保持跟随，防视口跳动）；`setMaximumBlockCount` 禁用（§① 1.1 B 已记）；追加只从尾部 append（`QTextCursor` movePosition(End) 后 insertBlock/insertText），**绝不头部插入**——会把已读内容推走并触发全文档重排。
+5. **QTextDocument.setHtml 逐章新建实例**：setHtml 会重置 undo/redo 栈（来源 #4 已核语义）；按 §② 2.3 管线每章新建 QTextDocument 天然规避复用副作用，翻章旧 document 直接丢弃让 GC 回收，**不要手动 clear()**（慢路径，与 §① 1.1 A #6 清空慢同源）。
+6. **pypdf 侧补充**：纯 Python 无 C 扩展（弱项：无图像渲染、layout 感知有限、表格提取弱——来源 #11 已核）；`page.extract_text()` 逐页可中断，配合 QThread 进度条天然分页，与 §③ QThread 化建议一致。
+
+---
+
 ## 来源清单（全部为技术文档/开源仓库/技术社区，无小说内容）
 
 | # | 来源 | 用途 | 核验方式 |
@@ -175,3 +188,4 @@ alias 命中即写 book_tags(auto)，新词也自动建 tags 行。
 | 14 | https://stackoverflow.com/questions/71638418/how-to-load-the-last-visited-page-in-epub-js + https://github.com/futurepress/epub.js/blob/master/examples/locations.html | CFI/百分比恢复先例 | 引擎摘要 |
 | 15 | calibre `last_read_positions`（book_id+format 粒度；源码抓取 404，多源一致结论） | 进度表粒度先例 | 检索一致 |
 | 16 | 本仓一手代码：store.py:217-227（book_tags）、proposals.py（pending 链）、match.py（alias 命中）、test_formats_w17.py（_READERS）、DEPENDENCIES.md（wheels 无 WebEngine） | 方案落地约束 | 直接读取 |
+| 17 | https://runebook.dev/zh/docs/qt/qwebengineview （Qt 文档镜像转述） | WebEngine 本地文件白屏/baseUrl 限制（§⑥.1） | 抓取全文 |
