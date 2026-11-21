@@ -123,7 +123,10 @@ _ACTIVE_FEEDBACK: set = set()  # 反馈 worker 同款持活注册表（坑 2/生
 _ACTIVE_IMPORTS: set = set()  # W16 F1：导入 worker 持活注册表
 
 
-ALLOWED_IMPORT_EXTS = {".txt", ".epub", ".md"}  # 与扫描侧 TEXT_EXTS 同口径
+# W17：扫描口径为单一事实源；UI 导入白名单 = 扫描口径并集文档扩展
+from reco_io.scanner import TEXT_EXTS as _SCAN_TEXT_EXTS
+
+ALLOWED_IMPORT_EXTS = set(_SCAN_TEXT_EXTS) | {".docx", ".pdf"}
 
 
 class ImportSignals(QObject):

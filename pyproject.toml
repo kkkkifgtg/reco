@@ -29,7 +29,7 @@ reco-cli = { workspace = true }
 reco-ui = { workspace = true }
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "python-docx>=1.2"]  # python-docx：W17 测试样例程序化生成（仅测试）
 
 [tool.pytest.ini_options]
 minversion = "8.0"

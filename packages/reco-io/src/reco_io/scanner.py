@@ -18,7 +18,7 @@ from dataclasses import dataclass, replace
 from reco_io.perf import perf_span
 
 DEFAULT_ZONES: tuple[str, ...] = ("liked", "candidate", "推荐专区")
-TEXT_EXTS: frozenset[str] = frozenset({".txt", ".epub", ".md"})
+TEXT_EXTS: frozenset[str] = frozenset({".txt", ".epub", ".md", ".docx", ".pdf"})  # W17：+docx/pdf
 
 _SKIP_DIRS = frozenset({".git", "$RECYCLE.BIN", "System Volume Information"})
 

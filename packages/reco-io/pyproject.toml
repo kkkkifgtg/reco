@@ -11,6 +11,7 @@ dependencies = [
   "reco-store",
   "reco-labels",
   "reco-relations",
+  "pypdf>=7.1",  # W17：PDF 文本层读取（wheels/ 缓存 + 断网演练）
 ]
 
 [tool.hatch.build.targets.wheel]
