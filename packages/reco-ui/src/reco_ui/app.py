@@ -23,11 +23,19 @@ from reco_ui.qt import (
     QStackedWidget,
     QTableView,
     QThreadPool,
+    QTimer,
     QVBoxLayout,
     QWidget,
     pyqtSignal,
 )
-from reco_ui.pages import FeedbackWorker, ProfileLoader, RankLoader, ZoneLoader, ZonePage
+from reco_ui.pages import (
+    FeedbackWorker,
+    ProfileLoader,
+    RankLoader,
+    ScanWorker,
+    ZoneLoader,
+    ZonePage,
+)
 from reco_ui.preload import Preloader
 from reco_ui.tables import RankTableModel
 from reco_ui.theme import apply_dark_theme
@@ -41,6 +49,11 @@ _LOAD_LIB_MS = 1500.0
 # 「打开文件夹」时由 ensure_zones 创建——F2 契约）。
 DEFAULT_DATA_ROOT = "F:/date/adult-reco/data"
 
+# N1：定时自动扫描默认关闭（config["scan_interval_s"]>0 才启动；QTimer 周期
+# 触发后台重扫，UI 零阻塞——语义与手动「刷新」同一条 sync 落库路径）。
+DEFAULT_SCAN_INTERVAL_S = 0
+_AUTO_SCAN_ZONES = ("liked", "candidate", "推荐专区")
+
 PAGE_ORDER = ("liked", "candidate", "recommend", "profile")
 PAGE_LABELS = {
     "liked": "喜欢专区",
@@ -48,6 +61,25 @@ PAGE_LABELS = {
     "recommend": "推荐专区",
     "profile": "画像",
 }
+
+
+def _zone_page_id(zone: str) -> str:
+    """专区名 → page_id（推荐专区页 zone 与 page_id 异名映射）。"""
+    return "recommend" if zone == "推荐专区" else zone
+
+
+def _sync_summary(added: int, removed: int, moved: int, changed: int) -> str:
+    """再扫描摘要文案（数值/枚举，无正文；全零 = 无变化）。"""
+    parts = []
+    if added:
+        parts.append(f"新增 {added}")
+    if removed:
+        parts.append(f"移除 {removed}")
+    if moved:
+        parts.append(f"移动 {moved}")
+    if changed:
+        parts.append(f"更新 {changed}")
+    return "，".join(parts) if parts else "无变化"
 
 class PagePlaceholder(QWidget):
     """板块骨架容器：真实数据视图由切片 2-4 填充。"""
@@ -79,7 +111,8 @@ class MainWindow(QMainWindow):
     def __init__(self, store=None, parent: QWidget | None = None, config=None) -> None:
         super().__init__(parent)
         self._store = store
-        self._data_root = dict(config or {}).get("data_root", DEFAULT_DATA_ROOT)  # W16 配置注入
+        self._config = dict(config or {})  # N1：配置快照（定时自动扫描参数读取）
+        self._data_root = self._config.get("data_root", DEFAULT_DATA_ROOT)  # W16 配置注入
         self._pages: dict[str, PagePlaceholder] = {}
         self._inflight: set[str] = set()  # 坑 2：in-flight 去重
         self._preloader = None  # W12b：骨架构建完成后在 _build_skeleton 末尾启动
@@ -87,6 +120,10 @@ class MainWindow(QMainWindow):
         self._nav = QListWidget()
         self._nav.setObjectName("nav")
         self._stack = QStackedWidget()
+        # N1：再扫描同步状态——在途计数（防重入）+ 定时器（默认关，配置开启）。
+        self._sync_inflight = 0
+        self._auto_pending = 0
+        self._auto_scan = None  # QTimer | None；_build_skeleton 末尾按配置启动
         with perf_span("ui.first_frame"):
             self._build_skeleton()
 
@@ -126,11 +163,27 @@ class MainWindow(QMainWindow):
         for pid in ("liked", "candidate"):
             self._pages[pid].reload_requested.connect(
                 lambda checked=False, p=pid: self._start_load(p))
+        # N1：「刷新」接线——zone 页同步+重查；推荐页同步+rank 唯一装配重绘。
+        for pid in ("liked", "candidate"):
+            self._pages[pid].refresh_requested.connect(
+                lambda checked=False, p=pid: self._start_sync_refresh(p))
+        rec_page = self._pages.get("recommend")
+        if hasattr(rec_page, "btn_refresh"):
+            rec_page.refresh_requested.connect(
+                lambda checked=False: self._start_sync_refresh("推荐专区"))
         body = QWidget()
         body_layout = QHBoxLayout(body)
         body_layout.addWidget(side, 0)
         body_layout.addWidget(self._stack, 1)
         self.setCentralWidget(body)
+        # N1：定时自动扫描（默认关；scan_interval_s>0 才启动，零阻塞后台重扫）。
+        interval_s = int(self._config.get("scan_interval_s", DEFAULT_SCAN_INTERVAL_S))
+        if interval_s > 0 and self._store is not None:
+            timer = QTimer(self)
+            timer.setInterval(interval_s * 1000)
+            timer.timeout.connect(self._on_auto_scan)
+            timer.start()
+            self._auto_scan = timer
 
     # —— 对外契约（切片 2-4 与测试使用）——
     def page_ids(self) -> list[str]:
@@ -237,6 +290,52 @@ class MainWindow(QMainWindow):
         if isinstance(page, ZonePage):
             page.mark_failed(message)
 
+    # —— N1：目录→库再扫描（手动「刷新」与定时自动扫描共用路径）——
+    def _on_auto_scan(self) -> None:
+        """QTimer 周期回调：上轮未完成跳过本轮（防重入）；UI 线程只派发。"""
+        if self._auto_pending:
+            return
+        for zone in _AUTO_SCAN_ZONES:
+            self._start_sync_refresh(zone, auto=True)
+
+    def _start_sync_refresh(self, zone: str, *, auto: bool = False) -> None:
+        """发起单专区目录→库再扫描（池线程；UI 线程零扫描零 DB 写，§11.1）。"""
+        if self._store is None:
+            return
+        self._sync_inflight += 1
+        if auto:
+            self._auto_pending += 1
+        worker = ScanWorker(self._store, zone, self._data_root)
+        worker.signals.done.connect(
+            lambda z, a, r, m, c, err, pid=_zone_page_id(zone), auto=auto:
+                self._on_sync_done(pid, z, a, r, m, c, err, auto=auto))
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_sync_done(self, page_id: str, zone: str, added: int, removed: int,
+                      moved: int, changed: int, error: str, *, auto: bool = False) -> None:
+        """同步完成 → UI 线程渲染（zone 页重查行；推荐页走 rank 唯一装配重绘）。"""
+        self._sync_inflight = max(0, self._sync_inflight - 1)
+        if auto:
+            self._auto_pending = max(0, self._auto_pending - 1)
+        page = self._pages.get(page_id)
+        summary = "刷新失败（可重试）：" + error if error else _sync_summary(added, removed, moved, changed)
+        if isinstance(page, ZonePage):
+            if error:
+                page._status.setText(summary)
+                return
+            from reco_ui.pages import zone_page_rows
+
+            try:
+                page.apply_rows(zone_page_rows(self._store, zone))
+            except Exception as exc:
+                page.mark_failed(f"{type(exc).__name__}: {exc}")
+                return
+            page._status.setText(summary)
+        elif isinstance(page, RecommendPage):
+            page._status.setText(summary)
+            if not error:
+                self._start_load("recommend")  # rank 唯一装配层重绘（A6，零复制）
+
     # —— W12b 预热契约（Preloader 消费的三方法）——
     def store(self):
         return self._store
@@ -342,6 +441,7 @@ class RecommendPage(QWidget):
     """
 
     page_id = "recommend"
+    refresh_requested = pyqtSignal()  # N1：「刷新」→ 主窗发起推荐专区目录→库再扫描
 
     def __init__(self, store=None, parent=None, *, data_root=None) -> None:
         super().__init__(parent)
@@ -354,8 +454,12 @@ class RecommendPage(QWidget):
         title.setObjectName("page-title")
         layout.addWidget(title)
         # W16 F2：推荐专区页同样有「打开文件夹」（zone=推荐专区 映射）
+        # N1：推荐专区页右上角「刷新」→ 目录→库再扫描（与 zone 页同一路径）。
         open_row = QHBoxLayout()
         open_row.addStretch(1)
+        self.btn_refresh = QPushButton("刷新")
+        self.btn_refresh.clicked.connect(self.refresh_requested.emit)
+        open_row.addWidget(self.btn_refresh)
         self.btn_open_folder = QPushButton("打开文件夹")
         open_row.addWidget(self.btn_open_folder)
         layout.addLayout(open_row)
@@ -392,6 +496,9 @@ class RecommendPage(QWidget):
 
     def set_rows(self, rows, names=None) -> None:
         self._model.set_rows(rows, names)
+
+    def row_count(self) -> int:
+        return self._model.rowCount()
 
     def apply_rank(self, out) -> None:
         """rank 输出唯一消费面（W13 承接①）：RankRow 序列直接渲染，零排序（A6/§10）。"""

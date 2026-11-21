@@ -421,18 +421,27 @@ def _apply_event(conn: sqlite3.Connection, event: Event) -> None:
     if t == "file_added":
         volume_id = _ensure_volume(conn, p["st_dev"], p.get("mount_hint"), at)
         book_id = _resolve_or_create_book(conn, p, at)
+        # N1 再扫描幂等（ADR-0003 投影层语义）：同 path 重扫/复活 upsert 同一行——
+        # 墓碑行（present=0）复活不留鬼行；首见照旧 INSERT（last_seen_at 推进）。
         conn.execute(
             "INSERT INTO files(volume_id, st_dev, st_ino, path, zone, size_bytes, mtime_ns, ext,"
-            " book_id, present, first_seen_at, last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,1,?,?)",
+            " book_id, present, first_seen_at, last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,1,?,?)"
+            " ON CONFLICT(path) DO UPDATE SET volume_id=excluded.volume_id,"
+            " st_dev=excluded.st_dev, st_ino=excluded.st_ino, zone=excluded.zone,"
+            " size_bytes=excluded.size_bytes, mtime_ns=excluded.mtime_ns, ext=excluded.ext,"
+            " book_id=excluded.book_id, present=1, last_seen_at=excluded.last_seen_at,"
+            " moved_from_path=NULL",
             (volume_id, p["st_dev"], p["st_ino"], p["path"], p["zone"], p["size_bytes"],
              p["mtime_ns"], p["ext"], book_id, at, at),
         )
     elif t == "file_removed":
         conn.execute("UPDATE files SET present = 0, last_seen_at = ? WHERE path = ?", (at, p["path"]))
     elif t == "file_moved":
+        # N1：跨专区移动携带 zone → 同步搬迁专区（不带 zone 保持原专区，向后兼容）。
         conn.execute(
-            "UPDATE files SET path = ?, last_seen_at = ?, moved_from_path = ? WHERE path = ?",
-            (p["new_path"], at, p["path"], p["path"]),
+            "UPDATE files SET path = ?, last_seen_at = ?, moved_from_path = ?,"
+            " zone = COALESCE(?, zone) WHERE path = ?",
+            (p["new_path"], at, p["path"], p.get("zone"), p["path"]),
         )
     elif t == "tag_added":
         conn.execute(
