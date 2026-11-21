@@ -144,6 +144,8 @@ def test_qss_has_pressed_state(qapp):
     from reco_ui.theme import DARK_QSS
 
     assert "QPushButton:pressed" in DARK_QSS, "缺按钮按下态样式"
+    # W18 增强：按下态必须含位移反馈（padding-top 9px，静止 8px）
+    assert "padding-top: 9px" in DARK_QSS, "缺按下位移反馈（W18 增强）"
     assert "::item:selected:active" in DARK_QSS or ":active" in DARK_QSS, "缺导航/表格 active 态"
 
 

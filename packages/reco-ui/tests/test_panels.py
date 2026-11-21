@@ -102,15 +102,18 @@ def test_inflight_dedup_and_failure_retry(qapp, store):
     assert win._inflight == {"liked", "recommend"}
     win._start_load(page)                       # 去重：重复请求被忽略
     assert win._inflight == {"liked", "recommend"}
-    # 等待 worker 完成（慢库 0.25s），让线程池泄洪避免跨测试信号竞态
-    deadline = time.monotonic() + 3.0
+    # 等待 worker 完成，让线程池泄洪避免跨测试信号竞态。
+    # W18 U2：lib_ms 放宽到 1500ms 后 0.25s 慢库会**成功装载**（旧 200ms 口径下
+    # 是超时失败）；故断言改为「in-flight 清理 + 不再处于加载中状态」，
+    # 超时/失败路径由 test_zone_failure_offers_retry_button 的 BrokenStore 专测。
+    deadline = time.monotonic() + 5.0
     while win._inflight and time.monotonic() < deadline:
         from reco_ui.qt import QApplication
 
         QApplication.processEvents()
         time.sleep(0.01)
     assert win._inflight == set()               # 完成后清理（成功或失败都清）
-    assert page.loaded is False                 # 超时/失败不置位「已加载」
+    assert page._status.text() != "加载中…"     # 不停在加载中（W18 U2 反馈语义）
     from reco_ui.qt import QThreadPool
 
     QThreadPool.globalInstance().waitForDone(3000)
