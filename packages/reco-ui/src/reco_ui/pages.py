@@ -8,15 +8,18 @@
 """
 from __future__ import annotations
 
+import os
 import time
 
 from reco_io.perf import perf_span
 from reco_ui.qt import (
     QAbstractTableModel,
+    QHBoxLayout,
     QLabel,
     QMenu,
     QModelIndex,
     QObject,
+    QPushButton,
     QRunnable,
     Qt,
     QTableView,
@@ -257,15 +260,47 @@ class ZoneLoader(QRunnable):
             _ACTIVE_LOADERS.discard(self)  # run() 完成，注册表释放
 
 
-class ZonePage(QWidget):
-    """喜欢/候选板块：表格 + 状态行；菜单按需构建（坑 7 幂等）。"""
+# W16 F2：专区目录映射（data_root + zone 名）；推荐专区中文目录名与文件表 zone 值一致。
+ZONE_DIR_NAMES = {"liked": "liked", "candidate": "candidate", "推荐专区": "推荐专区"}
 
-    def __init__(self, zone: str, store=None, parent=None) -> None:
+
+def open_zone_folder(data_root, zone: str, *, opener=None) -> str:
+    """打开专区数据目录：缺失则创建后 os.startfile。
+
+    注意：W2 的 ensure_zones 刻意不建目录（§8.1 避免猜用户意图）；
+    F2 的用户点击本身就是意图，故目录创建在本函数完成（root/专区层），
+    再调 ensure_zones 走 W2 校验契约。opener 可注入（测试断言参数）。
+    """
+    from pathlib import Path
+
+    from reco_io.scanner import ensure_zones
+
+    root = Path(data_root)
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / ZONE_DIR_NAMES[zone]
+    target.mkdir(exist_ok=True)
+    ensure_zones(root, zones=(zone,))
+    (opener or os.startfile)(str(target))
+    return str(target)
+
+
+class ZonePage(QWidget):
+    """喜欢/候选板块：表格 + 状态行；菜单按需构建（坑 7 幂等）。
+
+    W16：右上角「打开文件夹」（F2）+ 候选页专属「开始推荐」（F3，
+    完成后由主窗切到推荐专区页）；setAcceptDrops 拖拽导入（F1，切片 2）。
+    """
+
+    recommend_requested = pyqtSignal()  # F3：candidate 页「开始推荐」点击
+
+    def __init__(self, zone: str, store=None, parent=None, *, data_root=None) -> None:
         super().__init__(parent)
         self.zone = zone
         self.page_id = zone  # 与 PAGE_ORDER 对齐（liked/candidate）
         self.loaded = False
         self._store = store
+        self._data_root = data_root
+        self.setAcceptDrops(True)  # W16 F1：文件拖拽导入（实现在切片 2）
         layout = QVBoxLayout(self)
         title = QLabel("喜欢专区" if zone == "liked" else "候选池专区")
         title.setObjectName("page-title")
@@ -277,6 +312,20 @@ class ZonePage(QWidget):
         self._status = QLabel("待加载")
         self._status.setObjectName("dim")
         layout.addWidget(self._status)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        self.btn_open_folder = QPushButton("打开文件夹")
+        self.btn_open_folder.clicked.connect(self._open_folder)
+        btn_row.addWidget(self.btn_open_folder)
+        if zone == "candidate":  # F3：仅候选页有「开始推荐」
+            self.btn_recommend = QPushButton("开始推荐")
+            self.btn_recommend.clicked.connect(self.recommend_requested.emit)
+            btn_row.addWidget(self.btn_recommend)
+        layout.addLayout(btn_row)
+
+    def _open_folder(self) -> None:
+        """「打开文件夹」按钮（W16 F2）：data_root + zone 映射，ensure_zones 创建。"""
+        open_zone_folder(self._data_root, self.zone)
 
     def load_now(self) -> None:
         """同步装填（分级超时默认档；成功后才置「已加载」，坑 3）。"""
