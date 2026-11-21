@@ -3,7 +3,7 @@
 边界与裁定（G2r 审计基线 §L1-L7；工单 RR2/t3 验收口径）：
 - 只对 zone=liked 触发（AutoTagOutcome.ZONES）：candidate/推荐专区不自动打标、
   不提议——candidate 未读未确认，若自动打标会把「未确认偏好」混进画像正样本
-  （tag_hit 折叠进 axis_weights），污染轴权重与推荐依据，因此零动作。
+  （tag_hit 折叠进 axis_weights），污染轴权重与推荐依据，因此 ValueError 拒绝（零写入）。
 - 双层（工单 RR2 ②）：已存在标签（taxonomy alias 命中）→ record_tag_hits 直写
   book_tags(source=auto)（D1+F2 双保护继承：manual/user 行在写入层拒绝覆盖）；
   未知词不自动建 tags 行 → propose_tags 进 proposals(pending) 待用户显式确认
@@ -31,13 +31,44 @@ from reco_labels.store import BookTagRow, LabelsStore, ProposalRow, TagRow
 # 自动提议阈值（工单 06 proposals 语义沿用：count≥3 才提议）
 TAG_PROPOSE_THRESHOLD = 3
 
+# StoreAdapter 写路径指纹（事件流里标识来源）与 labels 事件折叠规则
+_ADAPTER_FP = "rr2/adapter/1"
+_PROPOSAL_STATUSES = frozenset({"pending", "accepted", "rejected"})
+# 已在对应写方法里落库的 labels 事件：append_event 收到时不再重复写，
+# 也绝不误映射成 proposal_created。
+_EVENTS_FOLDED_ELSEWHERE = frozenset({
+    "tag_created", "tag_proposed", "proposal_accepted", "proposal_rejected",
+    "tag_conflict",
+})
+
+
+def _parse_json_object(raw) -> dict:
+    """payload_json → 字典；损坏/非对象一律降级为空字典（读路径不抛）。"""
+    try:
+        payload = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return dict(payload) if isinstance(payload, Mapping) else {}
+
 
 class StoreAdapter:
     """reco_store.Store → LabelsStore 窄协议适配（W5 对接位；只读视图 + 写转发）。
 
-    Store 无 iter_tags 等方法——本适配从投影表读出并转换为 labels 侧行类型；
-    写方法直接转发 store.append_event（单写者队列，零第二条写路径）。依赖方向：
-    本类零 import reco-store——store 对象鸭子传入（§4.2，reco-labels 只挂 reco-core）。
+    Store 无 iter_tags 等方法——本适配从投影表读出并转换为 labels 侧行类型。
+    写路径：能映射成 reco-store 合法事件词汇的 labels 事件（tag_archived / label_set /
+    label_cleared）直接转发 append_event（单写者队列）；tag_created、tag_proposed、
+    proposal_accepted/rejected、tag_conflict 在对应写方法里已落库，append_event
+    收到时折叠为 no-op，绝不误映射成 proposal_created。
+
+    reco-store 事件契约有三处缺口（本适配经同一单写者队列补投影，待 store 补全后移除）：
+    ① 白名单不收录 payload_json/evidence_json（投影却读取它们）——proposal_created
+       事件只送白名单键 kind，业务负载（candidate/count/threshold）随后补写 proposals 列；
+    ② tag_merged 投影读 p["into"] 而白名单不含 into，合法事件不可构造——合并态
+       （tags.status/merged_into + 合并别名）由 _patch_merged_tag 补写；book_tags 的
+       auto 行仍走 label_set + label_cleared 事件（可重放）；
+    ③ proposals.status 无事件投影——update_proposal_status 同样经队列直改投影。
+    ①②③ 均不经事件流，重放不恢复这三处投影（已知接缝，store 侧后续票）。
+    依赖方向：本类零 import reco-store——store 对象鸭子传入（§4.2）。
     """
 
     def __init__(self, store) -> None:
@@ -102,23 +133,21 @@ class StoreAdapter:
             )
 
     def iter_proposals(self) -> Iterable[ProposalRow]:
+        """读 proposals 投影：candidate 不在真实列里（schema 无该列），从 payload_json 取。"""
         conn = self._store.read_conn()
         try:
             rows = conn.execute(
-                "SELECT proposal_id, kind, payload_json, status, created_at, candidate"
+                "SELECT proposal_id, kind, payload_json, status, created_at"
                 " FROM proposals ORDER BY proposal_id"
             ).fetchall()
         finally:
             conn.close()
-        for proposal_id, kind, payload_json, status, created_at, candidate in rows:
-            try:
-                payload = json.loads(payload_json or "{}")
-            except (TypeError, ValueError):
-                payload = {}
+        for proposal_id, kind, payload_json, status, created_at in rows:
+            payload = _parse_json_object(payload_json)
             yield ProposalRow(
-                proposal_id=str(proposal_id), kind=str(kind),
-                payload=payload if isinstance(payload, Mapping) else {},
-                status=str(status), created_at=str(created_at), candidate=str(candidate or ""),
+                proposal_id=str(proposal_id), kind=str(kind), payload=payload,
+                status=str(status), created_at=str(created_at),
+                candidate=str(payload.get("candidate") or ""),
             )
 
     def iter_events(self) -> Iterable:
@@ -147,38 +176,130 @@ class StoreAdapter:
         )
 
     def redirect_book_tag_rows(self, source_tag: str, target_tag: str) -> int:
-        raise NotImplementedError("redirect 走 tag_merged 事件（lifecycle），本适配不直写")
+        """合并搬迁：auto 行经 label_set + label_cleared 事件改写（事件流可重放）。
+
+        manual/user 行不搬——reco-store 无「重写人工行」事件（D1/F2 写入层双保护），
+        其身份经 tags.merged_into 链解析；彻底搬迁需 store 增补专用事件。
+        """
+        conn = self._store.read_conn()
+        try:
+            rows = conn.execute(
+                "SELECT book_id, source, confidence, basis_json, updated_at"
+                " FROM book_tags WHERE tag_id = ?", (str(source_tag),)
+            ).fetchall()
+        finally:
+            conn.close()
+        moved = 0
+        for book_id, source, confidence, basis_json, updated_at in rows:
+            if str(source) in ("manual", "user"):
+                continue
+            self.record_book_tag(
+                int(book_id), str(target_tag), source=str(source),
+                confidence=float(confidence or 0.0),
+                basis_json=str(basis_json or "{}"), updated_at=str(updated_at),
+            )
+            self._store.append_event(
+                "label_cleared", book_id=int(book_id),
+                payload={"tag_id": str(source_tag)},
+                occurred_at=str(updated_at), config_fingerprint=_ADAPTER_FP,
+            )
+            moved += 1
+        return moved
 
     def append_event(self, kind: str, payload: Mapping, occurred_at: str) -> None:
-        if kind == "tag_conflict":
+        """labels 事件 → reco-store 事件词汇分派（payload 只送白名单键，不误映射）。"""
+        at = str(occurred_at)
+        if kind == "tag_archived":
             self._store.append_event(
-                "tag_conflict", payload=dict(payload), occurred_at=str(occurred_at),
-                config_fingerprint="rr2/adapter/1",
+                "tag_archived", payload={"tag_id": str(payload.get("tag_id") or "")},
+                occurred_at=at, config_fingerprint=_ADAPTER_FP,
             )
+        elif kind == "tag_merged":
+            src = str(payload.get("source") or payload.get("tag_id") or "")
+            dst = str(payload.get("target") or payload.get("into") or "")
+            if not src or not dst:
+                raise ValueError("tag_merged 事件缺 source/target")
+            self._patch_merged_tag(src, dst)
+        elif kind in _EVENTS_FOLDED_ELSEWHERE:
+            # 见类 docstring：tag_created/tag_proposed 已由写方法落库；proposal 状态由
+            # update_proposal_status 写投影；tag_conflict 证据随 basis_json 落 book_tags
+            # （reco-store 无冲突事件投影）。不重复写、也绝不改写成 proposal_created。
             return
-        # labels 协议事件（tag_proposed/proposal_accepted/…）→ proposal_created 投影
-        candidate = str(payload.get("candidate") or "")
-        self._store.append_event(
-            "proposal_created",
-            payload={"kind": str(payload.get("kind") or "tag"),
-                     "candidate": candidate,
-                     "payload_json": json.dumps(dict(payload), ensure_ascii=False, sort_keys=True),
-                     "evidence_json": json.dumps(
-                         {"count": payload.get("count"), "threshold": payload.get("threshold")},
-                         ensure_ascii=False, sort_keys=True)},
-            occurred_at=str(occurred_at), config_fingerprint="rr2/adapter/1",
-        )
+        else:
+            raise ValueError(f"未知 labels 事件类型: {kind!r}")
+
+    def _patch_merged_tag(self, source_tag: str, target_tag: str) -> None:
+        """补写合并投影（tags.status/merged_into + 合并别名）。
+
+        reco-store 的 tag_merged 事件投影读 p["into"]，但 payload 白名单不含 into，
+        合法事件不可构造——本适配经单写者队列补投影，语义等价于 store 的 tag_merged
+        handler（见类 docstring 缺口②）。
+        """
+        def job(conn) -> None:
+            cur = conn.execute(
+                "UPDATE tags SET status = 'merged', merged_into = ? WHERE tag_id = ?",
+                (str(target_tag), str(source_tag)),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"标签不存在: {source_tag}")
+            conn.execute(
+                "INSERT OR IGNORE INTO tag_aliases(alias, tag_id, source) VALUES(?, ?, 'merge')",
+                (str(source_tag), str(target_tag)),
+            )
+
+        self._store.submit(job).result()
 
     def insert_proposal(self, kind: str, candidate: str,
                         payload: Mapping, created_at: str) -> str:
-        self.append_event("tag_proposed", {
-            "kind": str(kind), "candidate": str(candidate),
-            **{k: v for k, v in dict(payload).items() if k != "kind"},
-        }, str(created_at))
-        return f"prop-{str(candidate)}"
+        """写提案：proposal_created 事件（payload 只含白名单键）+ 投影列补写。
+
+        reco-store 白名单不收录 payload_json/evidence_json（见类 docstring 缺口①），
+        事件里只送 kind；candidate/count/threshold 随后经单写者队列补写 proposals
+        投影列，iter_proposals 从 payload_json 读 candidate。propose_tags 随后补发的
+        tag_proposed 已在本次落库（append_event 折叠为 no-op）。
+        """
+        body = {"candidate": str(candidate),
+                **{k: v for k, v in dict(payload).items() if k != "candidate"}}
+        evidence = {"count": payload.get("count"), "threshold": payload.get("threshold")}
+        self._store.append_event(
+            "proposal_created",
+            payload={"kind": str(kind) or "tag"},
+            occurred_at=str(created_at), config_fingerprint=_ADAPTER_FP,
+        )
+        conn = self._store.read_conn()
+        try:
+            row = conn.execute("SELECT MAX(proposal_id) FROM proposals").fetchone()
+        finally:
+            conn.close()
+        proposal_id = int(row[0])
+
+        def job(conn) -> None:
+            conn.execute(
+                "UPDATE proposals SET payload_json = ?, evidence_json = ?"
+                " WHERE proposal_id = ?",
+                (json.dumps(body, ensure_ascii=False, sort_keys=True),
+                 json.dumps(evidence, ensure_ascii=False, sort_keys=True), proposal_id),
+            )
+
+        self._store.submit(job).result()
+        return str(proposal_id)
 
     def update_proposal_status(self, proposal_id: str, status: str) -> None:
-        raise NotImplementedError("提案状态变更走 proposal_accepted/rejected 事件（后续票）")
+        """改 proposals.status（单写者队列直写投影；store 无状态事件，见类 docstring）。"""
+        if status not in _PROPOSAL_STATUSES:
+            raise ValueError(
+                f"非法提案状态: {status!r}（只允许 pending/accepted/rejected）"
+            )
+        pid = int(str(proposal_id))
+
+        def job(conn) -> None:
+            cur = conn.execute(
+                "UPDATE proposals SET status = ? WHERE proposal_id = ?", (status, pid),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(f"提案不存在: {proposal_id}")
+
+        self._store.submit(job).result()
 
 
 @dataclass(frozen=True)
@@ -259,7 +380,7 @@ def auto_tag_book(
 ) -> AutoTagOutcome:
     """单本 liked 书的自动打标编排：match → record(auto) → propose(新词)。
 
-    - zone 不在 ZONES：零动作（candidate/推荐专区不触发——未读不污染画像）；
+    - zone 不在 ZONES：ValueError 拒绝（candidate/推荐专区不触发——未读不污染画像）；
     - taxonomy alias 命中 → record_tag_hits 落 book_tags(source=auto)
       （manual/user 由写入层 ManualTagProtected 拒绝 → skipped_manual）；
     - 未知正计数词 → propose_tags 进 proposals(pending)，tags 表零改动。
@@ -270,7 +391,6 @@ def auto_tag_book(
             f"自动打标仅限 {AutoTagOutcome.ZONES} 专区，收到 {zone!r}"
             "（candidate 未读不污染画像——RR2 裁定）"
         )
-    taxonomy_rows = tuple(store.iter_tags())
     taxonomy = _load_taxonomy(store)
     hits = match_tags(stats, taxonomy)
     unknown = _unknown_counts(store, hits, stats)
