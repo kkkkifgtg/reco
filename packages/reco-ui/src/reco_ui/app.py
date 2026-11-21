@@ -33,7 +33,9 @@ from reco_ui.tables import RankTableModel
 from reco_ui.theme import apply_dark_theme
 
 # 分级超时（§11.2 坑 1）：worker 内 zone 查询墙钟上限（慢库不冻结 UI）。
-_LOAD_LIB_MS = 200.0
+# W18 U2：200ms 对真实库规模过激（0.3s 慢库即死页）——放宽到 1.5s；
+# 仍远小于无响应感知阈值，失败路径有「重试」入口兜底。
+_LOAD_LIB_MS = 1500.0
 
 # W16：数据根目录配置（用户可经 config 注入覆盖；当前默认目录可能不存在，
 # 「打开文件夹」时由 ensure_zones 创建——F2 契约）。
@@ -120,6 +122,10 @@ class MainWindow(QMainWindow):
         side_layout.addStretch(1)
         # W16 F3：候选页专属「开始推荐」→ 触发 RankLoader（W13 生产接线复用）+ 切页
         self._pages["candidate"].recommend_requested.connect(self._start_recommend)
+        # W18 U2：「重试」入口——失败页重新发起加载（点击无响应的兜底出口）
+        for pid in ("liked", "candidate"):
+            self._pages[pid].reload_requested.connect(
+                lambda checked=False, p=pid: self._start_load(p))
         body = QWidget()
         body_layout = QHBoxLayout(body)
         body_layout.addWidget(side, 0)
@@ -162,6 +168,7 @@ class MainWindow(QMainWindow):
             return  # 坑 2：同页并发请求只发一次
         if isinstance(page, ZonePage):
             self._inflight.add(page_id)
+            page.mark_loading()  # W18 U2：点击立即有可见反馈（「加载中…」+隐藏重试按钮）
             loader = ZoneLoader(self._store, page_id, lib_ms=_LOAD_LIB_MS)
             loader.signals.finished.connect(lambda rows, pid=page_id: self._on_zone_loaded(pid, rows))
             loader.signals.failed.connect(lambda msg, pid=page_id: self._on_zone_failed(pid, msg))
