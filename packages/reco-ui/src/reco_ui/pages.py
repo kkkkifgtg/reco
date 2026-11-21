@@ -45,6 +45,21 @@ from reco_ui.qt import (
 _ZONE_HEADERS = ("book_id", "书名", "大小", "备注")
 
 
+# ---------------------------------------------------------------- 推荐空态（T4）
+# 空态区分两个根因：库中尚无向量（去跑提取）vs 有向量但候选为空（candidate 区无书）。
+RECOMMEND_EMPTY_NO_VECTORS = "暂无推荐：库中缺少特征向量，请运行提取（reco_cli extract）"
+RECOMMEND_EMPTY_NO_CANDIDATES = "暂无推荐：候选为空"
+
+
+def recommend_empty_text(out) -> str | None:
+    """rank 输出 → 空态文案：有行返回 None；无行按 n_vectors 区分缺向量/候选为空。"""
+    if list(out.get("rank_rows") or ()):
+        return None
+    if out.get("n_vectors") == 0:
+        return RECOMMEND_EMPTY_NO_VECTORS
+    return RECOMMEND_EMPTY_NO_CANDIDATES
+
+
 def zone_page_rows(store, zone: str, *, limit: int = 200, lib_ms: float = 800.0) -> list[tuple]:
     """专区行查询：行 = (book_id, 名称, 大小, 备注)。
 

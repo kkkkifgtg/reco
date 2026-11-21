@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ from reco_store import open_store
 __all__ = [
     "cmd_eval",
     "cmd_explain",
+    "cmd_extract",
     "cmd_feedback",
     "cmd_recommend",
     "cmd_replay",
@@ -119,6 +121,84 @@ def cmd_scan(root, *, db=None) -> int:
         print(json.dumps(summary, ensure_ascii=False))
         _ = db  # 落库链路（file_added 事件）由工单 03/13 接管；本入口只读快照
         return 0 if not result.missing_zones else 0
+
+
+# ---------------------------------------------------------------- extract
+
+EXTRACT_CONFIG_FP = "cli/extract/1"
+# 提取侧非降级质量位：empty/oversized_streamed 仍是诚实统计（无向量时如实不写）
+_EXTRACT_OK_FLAGS = frozenset({"ok", "empty", "oversized_streamed"})
+
+
+def _present_files_by_book(store) -> dict[int, list[tuple[str, int]]]:
+    """present=1 文件行按 book_id 分组（同书可多条；book_id 序 → 确定性处理次序）。"""
+    conn = store.read_conn()
+    try:
+        rows = conn.execute(
+            "SELECT book_id, path, size_bytes FROM files"
+            " WHERE present = 1 AND book_id IS NOT NULL"
+            " ORDER BY book_id, path"
+        ).fetchall()
+    finally:
+        conn.close()
+    groups: dict[int, list[tuple[str, int]]] = {}
+    for book_id, path, size_bytes in rows:
+        groups.setdefault(int(book_id), []).append((str(path), int(size_bytes)))
+    return groups
+
+
+def _pick_extract_file(files: list[tuple[str, int]]) -> str | None:
+    """每本挑一个 size_bytes>0 且本机存在的 present 文件。
+
+    同书多条 files 行（T1 实测）时跳过 0 字节行；无可用文件 → None（调用方
+    如实计 failed，不硬失败）。
+    """
+    for path, size_bytes in files:
+        if size_bytes > 0 and os.path.isfile(path):
+            return path
+    return None
+
+
+def cmd_extract(db, *, limit=None) -> int:
+    """批量提取：每本 features_computed（有向量时再 vector_computed）。
+
+    - 遍历 files present=1（book_id 序）；每本取一个 size_bytes>0 且本机存在的
+      文件，逐本调用 reco_io.extract.extract_and_record；
+    - 无可用文件/降级（undecodable/corrupt_container/pending_timeout/
+      unreadable）如实计 failed，整轮不中断；
+    - stdout 只输出 JSON 摘要 {total, ok, failed, vectors}（无正文）。
+    """
+    from reco_io.extract import extract_and_record
+
+    with perf_span("cli.extract"):
+        store = open_store(db)
+        try:
+            groups = _present_files_by_book(store)
+            now = _utc_now_iso()
+            total = ok = failed = vectors = 0
+            for book_id, files in groups.items():
+                if limit is not None and total >= limit:
+                    break
+                total += 1
+                path = _pick_extract_file(files)
+                if path is None:
+                    failed += 1
+                    continue
+                result = extract_and_record(
+                    store, book_id, path, now=now,
+                    config_fingerprint=EXTRACT_CONFIG_FP,
+                )
+                if result.vector_written:
+                    vectors += 1
+                if result.quality_flag in _EXTRACT_OK_FLAGS:
+                    ok += 1
+                else:
+                    failed += 1
+            print(json.dumps({"total": total, "ok": ok, "failed": failed,
+                              "vectors": vectors}, ensure_ascii=False))
+            return 0
+        finally:
+            store.close()
 
 
 # ---------------------------------------------------------------- recommend

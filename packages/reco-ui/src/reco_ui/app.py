@@ -35,6 +35,7 @@ from reco_ui.pages import (
     ScanWorker,
     ZoneLoader,
     ZonePage,
+    recommend_empty_text,
     zone_page_rows,
 )
 from reco_ui.preload import Preloader
@@ -495,6 +496,12 @@ class RecommendPage(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         layout.addWidget(self.table, 1)
+        # T4 空态提示：无 rank 行时显示明确文案（缺向量 vs 候选为空）
+        self._empty = QLabel("")
+        self._empty.setObjectName("dim")
+        self._empty.setWordWrap(True)
+        self._empty.setVisible(False)
+        layout.addWidget(self._empty)
         btns = QHBoxLayout()
         self.btn_dislike = QPushButton("不合口味")
         self.btn_like = QPushButton("标为喜欢")
@@ -517,20 +524,36 @@ class RecommendPage(QWidget):
     def row_count(self) -> int:
         return self._model.rowCount()
 
+    def empty_text(self) -> str:
+        """空态文案（隐藏时为空串；测试/无障碍读取面）。"""
+        return "" if self._empty.isHidden() else self._empty.text()
+
+    def empty_visible(self) -> bool:
+        return not self._empty.isHidden()
+
     def apply_rank(self, out) -> None:
-        """rank 输出唯一消费面（W13 承接①）：RankRow 序列直接渲染，零排序（A6/§10）。"""
-        self._model.set_rows(list(out["rank_rows"]), dict(out.get("names") or {}))
+        """rank 输出唯一消费面（W13 承接①）：RankRow 序列直接渲染，零排序（A6/§10）。
+
+        T4 空态：无行时显示明确文案（n_vectors==0 → 缺向量并提示运行提取；
+        否则 → 候选为空）；有行时不显示。
+        """
+        rows = list(out["rank_rows"])
+        message = recommend_empty_text(out)
+        self._empty.setText(message or "")
+        self._empty.setVisible(message is not None)
+        self._model.set_rows(rows, dict(out.get("names") or {}))
         self._movable = set(out.get("movable") or set())  # W19 N2：真移动候选集
 
     def load_now(self) -> None:
         """同步装填（快照/探针口径）：与生产 worker 同一装配层 rank_candidates，零复制。
 
-        本方法不做任何重排——快照一致性测试与 GUI_PROBE 经此路径取行序。
+        本方法不做任何重排——快照一致性测试与 GUI_PROBE 经此路径取行序；
+        空态同样经 apply_rank 统一消费。
         """
         from reco_store.recommend import rank_candidates
 
         out = rank_candidates(self._store) if self._store is not None else {"rank_rows": (), "names": {}}
-        self._model.set_rows(list(out["rank_rows"]), dict(out.get("names") or {}))
+        self.apply_rank(out)
         self.mark_loaded()
 
     def mark_failed(self, message: str) -> None:

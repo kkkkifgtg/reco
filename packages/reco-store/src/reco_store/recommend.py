@@ -9,6 +9,9 @@
 - 依赖方向（§4.2）：reco-store → reco-core 允许（rank_only 只调用不排序复制）；
   cli/ui 平级共同 import 本层，互不依赖。
 - 本模块只读（read_conn + load_mutes），零写库；无正文接触（B2/B5）。
+- 候选域（T4/T6）：推荐候选 = candidate 专区 present 文件的书（按 book_id 去重）；
+  liked 只作正样本（positive_vectors 口径不变）；只要该书拥有任一 present liked
+  文件（同书双区也算），即从候选排除；推荐专区（输出落位）不进候选。
 """
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ __all__ = [
     "decode_vector_blob",
     "load_book_names",
     "load_books",
+    "load_candidate_books",
     "load_eval_samples",
     "load_profile",
     "load_vectors",
@@ -63,11 +67,39 @@ def load_vectors(store) -> dict[int, dict[int, float]]:
 
 
 def load_books(store) -> list[tuple[int, str | None]]:
-    """候选身份：(book_id, dedup_key) 按 book_id 升序（静音键匹配与确定性次序来源）。"""
+    """全库身份：(book_id, dedup_key) 按 book_id 升序（正样本口径/静音键匹配来源）。
+
+    候选域筛选见 load_candidate_books（T4：liked 不进候选）。
+    """
     conn = store.read_conn()
     try:
         rows = conn.execute(
             "SELECT book_id, dedup_key FROM books ORDER BY book_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [(int(r[0]), None if r[1] is None else str(r[1])) for r in rows]
+
+
+def load_candidate_books(store) -> list[tuple[int, str | None]]:
+    """候选身份：candidate 专区 present 文件的书（按 book_id 去重、升序）。
+
+    候选域 = candidate 专区，且排除「任何拥有 present liked 文件的 book_id」：
+    liked 是正样本，同书双区（liked + candidate 各一条 present 文件）也不得被
+    推荐（T6 修复）；liked 文件 present=0（已移除）不算拥有。推荐专区是输出
+    落位，同样不进候选——避免把已推荐的书再当候选。
+    """
+    conn = store.read_conn()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT b.book_id, b.dedup_key FROM books b"
+            " JOIN files f ON f.book_id = b.book_id"
+            " WHERE f.zone = 'candidate' AND f.present = 1"
+            "   AND NOT EXISTS ("
+            "       SELECT 1 FROM files lf"
+            "       WHERE lf.book_id = b.book_id AND lf.zone = 'liked' AND lf.present = 1"
+            "   )"
+            " ORDER BY b.book_id"
         ).fetchall()
     finally:
         conn.close()
@@ -134,26 +166,30 @@ def mute_map_from_store(store) -> dict[str, Any]:
 def rank_candidates(store) -> dict:
     """唯一装配：库态 → 画像/静音/真实候选向量 → rank_only 唯一入口（A6）。
 
+    候选域 = candidate 专区（T4；liked 只作正样本，推荐专区为输出落位）。
     返回 {rank_rows, profile, muted, names, n_candidates, n_vectors, n_skipped}；
-    排序由 reco_core 完成，本层零排序；无向量候选照常进排序（score 侧如实计
-    skipped/相似度 0——§6.3 特征缺失不静默当 0 分）。
+    n_candidates = 候选书数，n_vectors = 库级有向量书数（空态区分「是否已生产
+    向量」），n_skipped = 候选缺向量书数。排序由 reco_core 完成，本层零排序；
+    无向量候选照常进候选装配（score 侧跳过并计数——§6.3 不静默当 0 分）。
     """
     from reco_core.feedback import rank_only
 
     vectors = load_vectors(store)
-    books = load_books(store)
+    books = load_books(store)  # 全库身份：正样本向量口径（liked 仍参与正样本）
+    candidate_books = load_candidate_books(store)  # 候选域：candidate 专区
     candidates = [
         (f"b{bid}", {"dedup_key": key, "vector": vectors.get(bid, {})})
-        for bid, key in books
+        for bid, key in candidate_books
     ]
     positive_vectors = tuple(
         vectors[bid] for bid, _key in books if vectors.get(bid)
     )
+    candidate_vector_count = sum(1 for bid, _key in candidate_books if vectors.get(bid))
     profile = load_profile(store)
     mute = mute_map_from_store(store)
     out = rank_only(candidates, profile, mute=mute, positive_vectors=positive_vectors)
     out["names"] = load_book_names(store)
     out["n_candidates"] = len(candidates)
-    out["n_vectors"] = len(positive_vectors)
-    out["n_skipped"] = max(0, len(candidates) - len(positive_vectors))
+    out["n_vectors"] = len(positive_vectors)  # 库级：空态区分「是否已生产向量」
+    out["n_skipped"] = max(0, len(candidate_books) - candidate_vector_count)
     return out

@@ -150,7 +150,8 @@ def test_cli_gui_bitwise_consistency(tmp_path):
     cli = json.loads(_run_probe(CLI_PROBE, db))
     gui = json.loads(_run_probe(GUI_PROBE, db))
     items = cli["items"]
-    assert len(items) == len(gui) == 30
+    # T4：候选域 = candidate 专区（30 本中 liked 12 本不进候选）→ 18 行
+    assert len(items) == len(gui) == 18
     for it, row in zip(items, gui):
         # 逐位：book_id 顺序 / score / rank / is_exploration / reasons 全字段
         assert it["book_id"] == row[0]
@@ -281,6 +282,6 @@ def test_perf_tabs_snapshot_stable(tmp_path):
         b = json.loads(snap2.read_text(encoding="utf-8"))
         assert a == b  # 同库两次遍历快照逐位一致
         rec = next(p for p in a if p["page"] == "recommend")
-        assert rec["rows"] == 30  # rank 输出真实渲染（非 0 占位）
+        assert rec["rows"] == 18  # T4：candidate 专区 18 本；rank 输出真实渲染（非 0 占位）
     finally:
         s.close()
