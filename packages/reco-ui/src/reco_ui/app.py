@@ -6,10 +6,13 @@ worker（切片 2 起接 reco_ui.workers）。本切片落骨架、导航与按�
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from reco_io.perf import perf_span
 from reco_ui.qt import (
     QAbstractItemView,
     QApplication,
+    QIcon,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -82,6 +85,9 @@ class MainWindow(QMainWindow):
 
     def _build_skeleton(self) -> None:
         self.setWindowTitle("reco —— 本地小说推荐")
+        _icon = Path(__file__).parent / "assets" / "reco.ico"
+        if _icon.exists():
+            self.setWindowIcon(QIcon(str(_icon)))
         for pid in PAGE_ORDER:
             if pid == "recommend":
                 page = RecommendPage(self._store)  # 真实推荐页（切片 2 接线）
