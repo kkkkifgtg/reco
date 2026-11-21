@@ -146,6 +146,7 @@ class MainWindow(QMainWindow):
         if row < 0 or row >= len(PAGE_ORDER):
             return
         page = self._pages[PAGE_ORDER[row]]
+        self._stack.setCurrentIndex(self._stack.indexOf(page))  # W18b：切右栏（缺此行=点导航不换页）
         # W12b 验收 1：导航/功能点击 → ui_usage 计数递增（独立表，C12 不进口味流）。
         if self._store is not None:
             from datetime import datetime, timezone
