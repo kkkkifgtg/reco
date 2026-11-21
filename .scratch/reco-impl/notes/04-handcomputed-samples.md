@@ -157,3 +157,12 @@ audit 04 必查：B2（金丝雀+桶纯数值）、B5（全合成）、C11（fea
 - 流式路径边界安全：块间携带 max(alias_len)-1 字符尾巴再计数，与整读等价（S11 等价断言覆盖）；别名跨块不漏计。
 - 数据驱动：词表由调用方注入，reco_io 不内置任何机制词表（§5.6 硬约束）；match_tags 由 W6 鸭子读 .alias_counts，不 import 本实现。
 
+
+## 读取器扩展（W17，2026-11-21）
+
+_READERS 仅做容器→文本（.epub/.docx/.pdf），统计口径不动：EXTRACTOR_VERSION 仍为 reco-stats/1，不 bump。理由（implementer-4 裁定）：统计公式与口径不变；旧可读格式（txt/md/epub）特征逐位不变（S 系列 golden 全绿=不变量证据）；.docx/.pdf 此前不进 scanner、不存在旧行，无需重算；可追溯性由 files.ext 区分。
+
+- .docx：stdlib zipfile + XML 提取 word/document.xml w:t；w:p 段落边界换行
+- .pdf：pypdf 延迟导入；异常族归一 ValueError → undecodable 降级；无文本层 → empty
+- quality_flag 复用现有枚举，不加新旗标
+- RTF：时间盒裁定移交（见 rtf-handoff.md）

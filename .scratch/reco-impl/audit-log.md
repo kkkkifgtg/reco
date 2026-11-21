@@ -236,3 +236,17 @@
 - 隔离全量：390 passed in 12.37s（384 基线 + W16 12 新测试 - W14 遗留口径修正）；UI 子套件 53 passed。
 - 遗留观察（不阻断）：① data_root 默认 F:/date/adult-reco/data 可 config 注入覆盖——目录不存在由 F2 点击创建（契约自洽）；② ImportWorker 异常整体吞为 error 字符串（UI 只收字符串惯例），单文件 place 失败会中断整批（后续迭代可考虑逐文件容错）；③ os.startfile 仅 Windows——open_zone_folder 在非 Windows 无 startfile 属性（项目 Windows-only 口径内无碍）。
 
+
+## 2026-11-21T11:20+0800 R17（W17 格式扩展 DOCX/PDF，1603b52 @ feat/17-formats）审计 — PASS（建议可 merge）
+
+- 对象：1603b52（12 文件 +450/-8：features.py 读取器接缝 62 行 + scanner 白名单 + UI 并集 + test_formats_w17.py 229 行 15 测试 + pypdf 声明 + python-docx dev 声明 + uv.lock + 4 wheels）；基点 095cc72 正确。方法：git archive 隔离副本审计 tip。
+- ① 白名单单一事实源：scanner.TEXT_EXTS 扩 .docx/.pdf（一处改动）；UI ALLOWED_IMPORT_EXTS = set(scanner.TEXT_EXTS) | {".docx",".pdf"}——引用常量而非字面重复；并集语义成立（.txt/.md 本就在 TEXT_EXTS 内，并集幂等；向后兼容且扫描口径变化自动传导 UI）。三处收口零劈叉（测试 test_ui_import_whitelist_union 断言 >= TEXT_EXTS 且含 docx/pdf）。
+- ② _READERS 接缝：纯函数字典（suffix→读取函数，路径→纯文本零落盘零输出）；.epub 原实现原样入缝；新格式=加条目；分派逻辑从 if suffix==.epub 硬编码收敛为 _READERS.get + 外层降级统一（ValueError 族归一 undecodable）。
+- ③ DOCX stdlib：zipfile+ElementTree 提取 word/document.xml 的 w:t 文本，w:p 段落边界 \n\n 保留（测试断言段落换行）；坏 zip→corrupt_container、空文档→empty（真零不瞎填）。
+- ④ PDF pypdf：函数内延迟导入（W8 sklearn 先例，auditor 探针证实 import reco_io.features 后 sys.modules 无 pypdf/docx/sklearn/torch/numpy）；加密空密码失败/结构损坏→ValueError 归一→undecodable 降级；无文本层→empty 口径（扫描版降级不瞎填）；pypdf>=7.1 声明+4 wheels 在位（python-docx 仅 dev 组测试样例生成，不进运行时依赖）。
+- ⑤ 四态测试：docx（正常/损坏/加密形态模拟/空）+pdf（文本层/无文本层/加密/损坏）+接缝注册+段落换行+扫描拾取+UI 并集+B2 金丝雀扩展（docx/pdf 读取零输出流泄漏，金丝雀断言沿用）+EXTRACTOR_VERSION 不变断言。
+- ⑥ E2 重放（auditor）：TEXT_EXTS 回退到 W17 前 → 恰 2 failed（test_scanner_text_exts_extended + test_scanner_picks_up_docx_and_pdf，:198）→ 恢复 86 passed（reco-io 子套件）。
+- 两项披露裁决：EXTRACTOR_VERSION 不 bump——**成立**（版本钉的是统计口径，读取器只改变「怎么拿到纯文本」不改变「拿到文本后算什么」；现有 golden 测试不改一字全绿=不变量实证；若 bump 反而迫使全库无谓重算）；W2 scan 测试样例 notes.PDF→notes.png——**合理演进**（.pdf 入白名单后原样例不再是非文本，换成 png 保持「非法扩展」测试语义）。
+- 隔离全量：411 passed in 15.61s（独立复现，与 implementer-4 报告一致）。
+- 遗留观察（不阻断）：① test_formats_w17.py make_pdf 工厂 51-57 行有死代码（empty_layer 分支重赋 writer 后循环体为空、注释自述「简化」——行为正确但属坏味道，建议随手清理或收尾票）；② RTF 移交记录在案（.scratch/reco-impl/notes/rtf-handoff.md，正则剥控制字对 \uN 有损违背不瞎填、striprtf 超时间盒——口径文档已追加 W17 节）；③ 加密 docx 用非 zip 魔数模拟（真实加密 docx 是 OLE 容器）——降级路径语义等价，注释已如实披露模拟形态。
+
