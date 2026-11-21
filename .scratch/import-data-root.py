@@ -6,6 +6,11 @@ from datetime import datetime, timezone
 from reco_io.scanner import scan_zones
 from reco_store import open_store, dedup_key, normalize_book_name
 
+def to_int64(v: int) -> int:
+    """Windows st_dev/st_ino 是无符号 64 位；SQLite INTEGER 是有符号 64 位。
+    双字节补码回绕（与 os.stat 的 C 层一致），幂等可逆。"""
+    return (v & 0xFFFFFFFFFFFFFFFF) - (1 << 64) if (v & 0xFFFFFFFFFFFFFFFF) >= (1 << 63) else (v & 0xFFFFFFFFFFFFFFFF)
+
 root = Path("F:/date/adult-reco/data")
 store = open_store(Path("F:/date/adult-reco/reco/reco.db"))
 now = datetime.now(timezone.utc).isoformat()
@@ -16,7 +21,7 @@ for fp in result.fingerprints:
     payload = {
         "path": fp.path, "zone": fp.zone, "ext": fp.ext,
         "size_bytes": int(fp.size_bytes), "mtime_ns": int(fp.mtime_ns),
-        "st_dev": int(fp.st_dev), "st_ino": int(fp.st_ino),
+        "st_dev": to_int64(int(fp.st_dev)), "st_ino": to_int64(int(fp.st_ino)),
         "display_name": name,
         "normalized_name": normalize_book_name(name),
         "dedup_key": dedup_key(int(fp.size_bytes), name),
