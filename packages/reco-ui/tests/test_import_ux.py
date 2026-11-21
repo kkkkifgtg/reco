@@ -122,3 +122,131 @@ def test_start_recommend_triggers_rank_loader_and_switches(qapp, store, tmp_path
     assert len(FakeRankLoader.instances) == 1, "开始推荐必须触发 RankLoader"
     assert win._nav.currentRow() == 2, "完成后自动切到推荐专区页"
     win.close()
+
+# —— F1 拖拽导入（切片 2）——
+
+def test_drag_handlers_override_and_accept_policy(qapp, tmp_path):
+    """红：dragEnterEvent/dropEvent 无 override 时拖拽无效（继承 QWidget 默认=忽略）。"""
+    from reco_ui.qt import QWidget
+    from reco_ui.pages import ZonePage
+
+    page = ZonePage("liked", store=None, data_root=str(tmp_path))
+    assert type(page).dragEnterEvent is not QWidget.dragEnterEvent, "dragEnterEvent 未实现（拖拽无效）"
+    assert type(page).dropEvent is not QWidget.dropEvent, "dropEvent 未实现（拖拽无效）"
+
+    from reco_ui.qt import QUrl
+
+    class FakeMime:
+        def __init__(self, paths):
+            self._urls = [QUrl.fromLocalFile(p) for p in paths]
+
+        def hasUrls(self):
+            return bool(self._urls)
+
+        def urls(self):
+            return self._urls
+
+    class FakeEvent:
+        def __init__(self, paths):
+            self._mime = FakeMime(paths)
+            self.accepted = False
+
+        def mimeData(self):
+            return self._mime
+
+        def acceptProposedAction(self):
+            self.accepted = True
+
+        def ignore(self):
+            self.accepted = False
+
+    ok = FakeEvent([str(_make_src(tmp_path, "a.txt"))])
+    page.dragEnterEvent(ok)
+    assert ok.accepted, "合法 .txt 拖入必须被接受"
+    bad = FakeEvent([str(_make_src(tmp_path, "b.exe"))])
+    page.dragEnterEvent(bad)
+    assert not bad.accepted, "非法扩展拖入必须被忽略"
+
+
+def _make_src(tmp_path, name, content="合成正文，不含真实作品。"):
+    p = tmp_path / "src" / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content, encoding="utf-8")
+    return p
+
+
+def _drain():
+    from reco_ui.qt import QApplication, QThreadPool
+
+    QThreadPool.globalInstance().waitForDone(8000)
+    QApplication.processEvents()
+
+
+def test_import_places_file_and_persists_file_added(qapp, store, tmp_path):
+    """拖入 → place_by_hardlink 落位 → file_added 落库（payload 与 scan 同构）→ 刷新行。"""
+    from pathlib import Path
+
+    from reco_ui.pages import ZonePage
+
+    src = _make_src(tmp_path, "novel-a.txt")
+    page = ZonePage("liked", store=store, data_root=str(tmp_path / "data"))
+    page._start_import([str(src)])
+    _drain()
+    placed = tmp_path / "data" / "liked" / "novel-a.txt"
+    assert placed.exists(), "落位产物必须存在于专区目录（硬链接/复制）"
+    conn = store.read_conn()
+    try:
+        files = conn.execute(
+            "SELECT path, zone, size_bytes, mtime_ns, st_dev, st_ino FROM files WHERE present=1").fetchall()
+        books = conn.execute(
+            "SELECT display_name, normalized_name, dedup_key FROM books").fetchall()
+    finally:
+        conn.close()
+    assert len(files) == 1
+    path, zone, size, mtime_ns, st_dev, st_ino = files[0]
+    assert Path(path) == placed, "payload.path 必须是专区目录产物实际路径"
+    assert zone == "liked"
+    st = placed.stat()
+    assert (size, mtime_ns, st_dev, st_ino) == (st.st_size, st.st_mtime_ns, st.st_dev, st.st_ino)
+    assert len(books) == 1 and books[0][0] == "novel-a.txt"
+    assert books[0][2]  # dedup_key 非空（同构契约）
+    assert page.row_count() == 1, "导入完成后表格已刷新"
+
+
+def test_import_rejects_invalid_extension_and_directory(qapp, store, tmp_path):
+    """非法扩展与目录拒绝：不落位、不落库，状态提示条数。"""
+    from reco_ui.pages import ZonePage
+
+    src = _make_src(tmp_path, "evil.exe")
+    (tmp_path / "src" / "adir").mkdir()
+    page = ZonePage("candidate", store=store, data_root=str(tmp_path / "data"))
+    page._start_import([str(src), str(tmp_path / "src" / "adir")])
+    _drain()
+    conn = store.read_conn()
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM files WHERE present=1").fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 0
+    assert "拒绝" in page._status.text() and "2" in page._status.text()
+
+
+def test_import_twice_same_file_skips_no_duplicate(qapp, store, tmp_path):
+    """同文件二次导入：place SKIPPED（W3 指纹判等）→ 不重复落库；状态提示跳过数。"""
+    from reco_ui.pages import ZonePage
+
+    src = _make_src(tmp_path, "dup.txt")
+    page = ZonePage("liked", store=store, data_root=str(tmp_path / "data"))
+    page._start_import([str(src)])
+    _drain()
+    first_status = page._status.text()
+    page._start_import([str(src)])
+    _drain()
+    conn = store.read_conn()
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM files WHERE present=1").fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 1, "指纹判等：重复导入不产生第二行"
+    assert "跳过" in page._status.text() and "跳过" not in first_status
+

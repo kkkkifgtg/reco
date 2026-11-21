@@ -23,6 +23,7 @@ from reco_ui.qt import (
     QRunnable,
     Qt,
     QTableView,
+    QThreadPool,
     QVBoxLayout,
     QWidget,
     pyqtSignal,
@@ -119,6 +120,85 @@ class LoaderSignals(QObject):
 # 注册表在 run() 结束（finally）时释放，保证任何时点 worker 都有活引用。
 _ACTIVE_LOADERS: set = set()
 _ACTIVE_FEEDBACK: set = set()  # 反馈 worker 同款持活注册表（坑 2/生命周期）
+_ACTIVE_IMPORTS: set = set()  # W16 F1：导入 worker 持活注册表
+
+
+ALLOWED_IMPORT_EXTS = {".txt", ".epub", ".md"}  # 与扫描侧 TEXT_EXTS 同口径
+
+
+class ImportSignals(QObject):
+    done = pyqtSignal(int, int, int, str)  # (imported, skipped, rejected, error)
+
+
+class ImportWorker(QRunnable):
+    """W16 F1：place_by_hardlink 落位 + file_added 落库（池线程；UI 零阻塞）。
+
+    payload 契约与 seed_books/scan 同构：path=专区目录产物实际路径、
+    st_dev/st_ino 来自 PlacementResult 对应产物的 stat（队长契约补充：
+    扫描器后续扫到同一文件按 (st_dev, st_ino) 配对，不重复建 book）。
+    """
+
+    def __init__(self, store, zone: str, data_root, paths) -> None:
+        super().__init__()
+        self._store = store
+        self._zone = zone
+        self._data_root = str(data_root)
+        self._paths = list(paths)
+        self.signals = ImportSignals()
+        _ACTIVE_IMPORTS.add(self)
+
+    def run(self) -> None:
+        imported = skipped = rejected = 0
+        try:
+            from pathlib import Path
+
+            from reco_io.placement import PlacementMode, place_by_hardlink
+            from reco_store import dedup_key, normalize_book_name
+            from reco_ui.pages import open_zone_folder
+
+            zone_dir = Path(open_zone_folder(self._data_root, self._zone, opener=lambda p: None))
+            for raw in self._paths:
+                p = Path(raw)
+                if not p.is_file() or p.suffix.lower() not in ALLOWED_IMPORT_EXTS:
+                    rejected += 1
+                    continue
+                result = place_by_hardlink(p, zone_dir)
+                if result.mode == PlacementMode.SKIPPED:
+                    skipped += 1
+                    continue
+                st = result.dst.stat()
+                display = result.dst.name
+                self._store.append_event("file_added", payload={
+                    "path": str(result.dst),
+                    "zone": self._zone,
+                    "ext": result.dst.suffix.lower(),
+                    "size_bytes": int(st.st_size),
+                    "mtime_ns": int(st.st_mtime_ns),
+                    "st_dev": int(st.st_dev),
+                    "st_ino": int(st.st_ino),
+                    "display_name": display,
+                    "normalized_name": normalize_book_name(display),
+                    "dedup_key": dedup_key(int(st.st_size), display),
+                }, occurred_at=_utcnow_iso(), config_fingerprint="gui/import/1", actor="user")
+                imported += 1
+            error = ""
+        except Exception as exc:  # UI 只收字符串
+            error = f"{type(exc).__name__}: {exc}"
+        self._emit(imported, skipped, rejected, error)
+
+    def _emit(self, imported: int, skipped: int, rejected: int, error: str) -> None:
+        try:
+            self.signals.done.emit(imported, skipped, rejected, error)
+        except RuntimeError:
+            pass  # 接收方已销毁
+        finally:
+            _ACTIVE_IMPORTS.discard(self)
+
+
+def _utcnow_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
 
 
 class FeedbackSignals(QObject):
@@ -326,6 +406,53 @@ class ZonePage(QWidget):
     def _open_folder(self) -> None:
         """「打开文件夹」按钮（W16 F2）：data_root + zone 映射，ensure_zones 创建。"""
         open_zone_folder(self._data_root, self.zone)
+
+    # —— W16 F1：拖拽导入 ——
+    def dragEnterEvent(self, event) -> None:  # noqa: N802（Qt 命名）
+        """扩展名白名单预筛（目录/非法扩展忽略，不进入 drop）。"""
+        from reco_ui.qt import QUrl
+
+        for url in event.mimeData().urls():
+            path = QUrl(url).toLocalFile()
+            if os.path.isfile(path) and os.path.splitext(path)[1].lower() in ALLOWED_IMPORT_EXTS:
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+    def dropEvent(self, event) -> None:  # noqa: N802（Qt 命名）
+        """drop → 池线程导入 worker（UI 零阻塞）；完成回调刷新表格。"""
+        from reco_ui.qt import QUrl
+
+        paths = [QUrl(u).toLocalFile() for u in event.mimeData().urls()]
+        event.acceptProposedAction()
+        self._start_import(paths)
+
+    def _start_import(self, paths) -> None:
+        """发起导入：worker 池线程执行，完成信号回 UI 刷新（复用切片 3 回调模式）。"""
+        if self._store is None:
+            return
+        self._status.setText(f"导入中（{len(paths)} 项）…")
+        worker = ImportWorker(self._store, self.zone, self._data_root, paths)
+        worker.signals.done.connect(self._on_import_done)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_import_done(self, imported: int, skipped: int, rejected: int, error: str) -> None:
+        """导入完成 → 重查本页行（apply_rows 复用）+ 状态摘要（摘要在刷新后写，不被覆盖）。"""
+        if error:
+            self._status.setText(f"导入失败（可重试）：{error}")
+            return
+        try:
+            rows = zone_page_rows(self._store, self.zone)
+        except Exception as exc:
+            self.mark_failed(f"{type(exc).__name__}: {exc}")
+            return
+        self.apply_rows(rows)
+        parts = [f"导入 {imported}"]
+        if skipped:
+            parts.append(f"跳过 {skipped}")
+        if rejected:
+            parts.append(f"拒绝 {rejected}")
+        self._status.setText("，".join(parts))
 
     def load_now(self) -> None:
         """同步装填（分级超时默认档；成功后才置「已加载」，坑 3）。"""
