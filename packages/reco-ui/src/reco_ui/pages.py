@@ -124,7 +124,25 @@ class ZoneTableModel(QAbstractTableModel):
         return None
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid() or role != Qt.ItemDataRole.DisplayRole:
+        if not index.isValid():
+            return None
+        if role == Qt.ItemDataRole.ToolTipRole:
+            # #66：悬停显示该书标签（Qt 原生 tooltip，悬停即弹出）
+            if not (0 <= index.row() < len(self._rows)):
+                return None
+            row = self._rows[index.row()]
+            if not row:
+                return None
+            try:
+                book_id = int(row[0])
+            except (TypeError, ValueError):
+                return None
+            provider = getattr(self, "tag_provider", None)
+            labels = provider(book_id) if provider is not None else []
+            if not labels:
+                return "暂无标签"
+            return "标签：" + "、".join(labels)
+        if role != Qt.ItemDataRole.DisplayRole:
             return None
         row = self._rows[index.row()]
         col = index.column()
@@ -659,6 +677,14 @@ class ZonePage(QWidget):
         layout.addWidget(title)
         self._table = QTableView()
         self._model = ZoneTableModel()
+        # #66：悬停显示标签（provider 惰性查库，悬停时才触发）
+        if store is not None:
+            _store_ref = store
+
+            def _tags_of(book_id, _s=_store_ref):
+                return book_tags_display(_s, book_id)
+
+            self._model.tag_provider = _tags_of
         self._table.setModel(self._model)
         self._table.doubleClicked.connect(self._on_double_clicked)  # RR1 T5：双击进阅读页
         layout.addWidget(self._table, 1)
@@ -847,6 +873,33 @@ class ZonePage(QWidget):
         else:
             menu.addAction("移到候选池")
         return menu
+
+
+# ---------------------------------------------------------------- 标签悬停（#66）
+def book_tags_display(store, book_id: int) -> list[str]:
+    """某本书的标签**显示名**列表（悬停 tooltip 用）。
+
+    join book_tags → tags 取 label（无 label 时回退 tag_id）；按 tag_id 排序保证稳定。
+    无标签/无库 → 空列表（诚实降级，不伪造）。
+    """
+    if store is None:
+        return []
+    conn = store.read_conn()
+    try:
+        rows = conn.execute(
+            "SELECT t.tag_id, t.label FROM book_tags bt"
+            " JOIN tags t ON t.tag_id = bt.tag_id"
+            " WHERE bt.book_id = ? ORDER BY t.tag_id", (int(book_id),)).fetchall()
+    except Exception:
+        return []
+    finally:
+        conn.close()
+    out: list[str] = []
+    for tag_id, label in rows:
+        name = str(label) if label else str(tag_id)
+        if name and name not in out:
+            out.append(name)
+    return out
 
 
 # ---------------------------------------------------------------- proposals 待确认（#48）

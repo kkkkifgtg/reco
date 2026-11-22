@@ -46,7 +46,23 @@ class RankTableModel(QAbstractTableModel):
         return None
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid() or role != Qt.ItemDataRole.DisplayRole:
+        if not index.isValid():
+            return None
+        if role == Qt.ItemDataRole.ToolTipRole:
+            # #66：悬停显示该书标签（与专区页一致）
+            if not (0 <= index.row() < len(self._rows)):
+                return None
+            raw = str(self._rows[index.row()].book_id)
+            try:
+                book_id = int(raw.lstrip("b"))
+            except ValueError:
+                return None
+            provider = getattr(self, "tag_provider", None)
+            labels = provider(book_id) if provider is not None else []
+            if not labels:
+                return "暂无标签"
+            return "标签：" + "、".join(labels)
+        if role != Qt.ItemDataRole.DisplayRole:
             return None
         row = self._rows[index.row()]
         col = index.column()
