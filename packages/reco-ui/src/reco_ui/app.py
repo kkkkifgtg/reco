@@ -194,7 +194,7 @@ class MainWindow(QMainWindow):
         self._pages["liked"].zone_changed = self._on_zone_changed
         self._pages["candidate"].zone_changed = self._on_zone_changed
         # RR1 T5：双击作品 → 打开阅读页（ZonePage 只发信号，主窗决定切页）。
-        for pid in ("liked", "candidate"):
+        for pid in ("liked", "candidate", "recommend"):
             self._pages[pid].reader_requested.connect(self._open_reader)
         body = QWidget()
         body_layout = QHBoxLayout(body)
@@ -551,6 +551,7 @@ class RecommendPage(QWidget):
 
     page_id = "recommend"
     refresh_requested = pyqtSignal()  # N1：「刷新」→ 主窗发起推荐专区目录→库再扫描
+    reader_requested = pyqtSignal(str, object)  # 双击推荐行 → 主窗打开阅读页 (path, book_id)
 
     def __init__(self, store=None, parent=None, *, data_root=None) -> None:
         super().__init__(parent)
@@ -587,6 +588,8 @@ class RecommendPage(QWidget):
         self.table.setModel(self._model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # 双击推荐行 → 打开阅读页（与 liked/candidate 专区页同一交互）
+        self.table.doubleClicked.connect(self._on_double_clicked)
         layout.addWidget(self.table, 1)
         # T4 空态提示：无 rank 行时显示明确文案（缺向量 vs 候选为空）
         self._empty = QLabel("")
@@ -609,6 +612,41 @@ class RecommendPage(QWidget):
         self._status = QLabel("")
         self._status.setObjectName("dim")
         layout.addWidget(self._status)
+
+    def _rec_source_path(self, book_id: int) -> str:
+        """推荐专区该书的现存路径（库内 files 行）；无则回退 data_root/推荐专区/书名。"""
+        if self._store is None:
+            return ""
+        conn = self._store.read_conn()
+        try:
+            row = conn.execute(
+                "SELECT path FROM files WHERE book_id = ? AND present = 1"
+                " ORDER BY file_id LIMIT 1", (int(book_id),)).fetchone()
+        finally:
+            conn.close()
+        if row is not None:
+            return str(row[0])
+        return ""
+
+    def _on_double_clicked(self, index) -> None:
+        """双击推荐行 → 打开阅读页；行失效/源缺失时状态栏诚实提示（不静默）。"""
+        if self._store is None or index is None or not index.isValid():
+            return
+        row = index.row()
+        raw = self._model.book_id_at(row)
+        if raw is None:
+            return
+        # rank 输出书号名空间为 "b<N>"，转真实整数 book_id
+        try:
+            book_id = int(str(raw).lstrip("b"))
+        except ValueError:
+            self._status.setText(f"无法打开：书号无法解析（{raw}）")
+            return
+        path = self._rec_source_path(book_id)
+        if not path or not os.path.isfile(path):
+            self._status.setText("文件缺失，无法打开：该作品在本机已不存在")
+            return
+        self.reader_requested.emit(path, book_id)
 
     def set_rows(self, rows, names=None) -> None:
         self._model.set_rows(rows, names)
