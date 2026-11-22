@@ -864,17 +864,40 @@ class Store:
         return ReplayReport(ok=not diffs, diffs=tuple(diffs), compare_rows=compare_rows)
 
 
-def _dump_rows(db_path: str | Path, table: str) -> list[tuple]:
-    """整表快照（重放比对用）：表名只能取自 COMPARE_TABLES 白名单。
+_DUMP_SQL: dict[str, str] = {
+    "volumes": "SELECT * FROM volumes ORDER BY rowid",
+    "files": "SELECT * FROM files ORDER BY rowid",
+    "books": "SELECT * FROM books ORDER BY rowid",
+    "features": "SELECT * FROM features ORDER BY rowid",
+    "feature_vectors": "SELECT * FROM feature_vectors ORDER BY rowid",
+    "tags": "SELECT * FROM tags ORDER BY rowid",
+    "tag_aliases": "SELECT * FROM tag_aliases ORDER BY rowid",
+    "book_tags": "SELECT * FROM book_tags ORDER BY rowid",
+    "relation_graphs": "SELECT * FROM relation_graphs ORDER BY rowid",
+    "relation_fields": "SELECT * FROM relation_fields ORDER BY rowid",
+    "signals": "SELECT * FROM signals ORDER BY rowid",
+    "events": "SELECT * FROM events ORDER BY rowid",
+    "profile_versions": "SELECT * FROM profile_versions ORDER BY rowid",
+    "rec_runs": "SELECT * FROM rec_runs ORDER BY rowid",
+    "recommendations": "SELECT * FROM recommendations ORDER BY rowid",
+    "mutes": "SELECT * FROM mutes ORDER BY rowid",
+}
 
-    表名走 SQL 拼接（SQLite 不支持参数化标识符），因此必须显式白名单把关：
-    调用方目前只传 COMPARE_TABLES 成员，此断言防未来误用（Semgrep 告警据此消除）。
+
+def _dump_rows(db_path: str | Path, table: str) -> list[tuple]:
+    """整表快照（重放比对用）：语句取自**常量映射**，不做任何字符串拼接。
+
+    重放比对需遍历 15 张表，而 SQLite 不支持参数化标识符；这里把每条语句
+    预先写成常量字面量，表名只用作字典键——无拼接、无用户输入路径
+    （Code Scanning #6/#7 的消除方式）。
     """
-    if table not in COMPARE_TABLES:
-        raise ValueError(f"_dump_rows 只接受 COMPARE_TABLES 内的表名: {table!r}")
+    try:
+        sql = _DUMP_SQL[table]
+    except KeyError:
+        raise ValueError(f"_dump_rows 只接受 COMPARE_TABLES 内的表名: {table!r}") from None
     conn = sqlite3.connect(db_path)
     try:
-        return conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+        return conn.execute(sql).fetchall()
     finally:
         conn.close()
 
