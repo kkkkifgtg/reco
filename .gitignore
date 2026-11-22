@@ -36,3 +36,6 @@ docs/agents/workspace.yaml
 docs/agents/label-colors.yaml
 # 与本项目无关的独立小工具（如需纳入版本库请先移到 scripts/ 下）
 telegra_downloader.py
+
+# 教学课程工作区（教学生成物，不入产品库）
+.teach/
