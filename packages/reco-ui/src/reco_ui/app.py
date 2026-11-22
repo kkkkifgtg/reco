@@ -757,6 +757,21 @@ def run_tabs(win: "MainWindow", snapshot_path: str | None = None) -> int:
     return 0
 
 
+
+def _default_db_path() -> Path:
+    """默认运行库路径：自本文件向上找含 pyproject.toml 的仓库根，取其下 reco.db。
+
+    不用固定 parents[N]：目录结构变动（如仓库上移一层）会让固定层数解析到错误目录，
+    曾导致 GUI 打开空的 packages/reco.db、推荐页误报「库中缺少特征向量」。
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "pyproject.toml").is_file() and (parent / "packages").is_dir():
+            return parent / "reco.db"
+    # 兜底：旧行为（找不到仓库根时保持可运行）
+    return here.parents[3] / "reco.db"
+
+
 def run(argv=None) -> int:
     """事件循环入口；集中 QSS 在此挂载（美观不阻塞首帧骨架）。
 
@@ -765,7 +780,7 @@ def run(argv=None) -> int:
     """
     app = QApplication.instance() or QApplication(argv or [])
     apply_dark_theme(app)
-    _default_db = Path(__file__).resolve().parents[3] / "reco.db"
+    _default_db = _default_db_path()
     from reco_store import open_store as _open_store
 
     _store = _open_store(_default_db)
