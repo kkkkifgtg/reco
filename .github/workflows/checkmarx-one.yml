@@ -1,0 +1,69 @@
+
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+
+# GitHub 官方 code-scanning/checkmarx-one 模板的改进版
+# 触发场景：在 master 分支的 Pull Request（打开 / 重开 / 推送更新）时运行
+
+name: Checkmarx Scan
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches: [ "master" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    permissions:
+      contents: read          # actions/checkout 拉取代码
+      security-events: write  # github/codeql-action/upload-sarif 上传 SARIF 结果
+      actions: read           # 私有仓库下 upload-sarif 所需
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 检查 Checkmarx 凭据
+        id: creds
+        # 未配置 CX_* secrets 时跳过扫描并给出提示，避免红灯
+        env:
+          CX_CLIENT_ID: ${{ secrets.CX_CLIENT_ID }}
+        run: |
+          if [ -n "$CX_CLIENT_ID" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::未配置 CX_* secrets，跳过 Checkmarx 扫描"
+          fi
+
+      - name: Checkmarx One scan
+        if: steps.creds.outputs.present == 'true'
+        # 固定到 v2.3.47 的 commit SHA（tag 名只有 2.3.x 版本号，没有 @2）
+        uses: checkmarx/ast-github-action@58c998c5d78b3ecfa51e7cbde852d5565d5dea0b
+        with:
+          # 改动2：base_uri 改为读取 Secret，避免把租户环境域名写死在仓库里
+          base_uri: ${{ secrets.CX_BASE_URI }}
+          cx_client_id: ${{ secrets.CX_CLIENT_ID }}
+          cx_client_secret: ${{ secrets.CX_CLIENT_SECRET }}
+          cx_tenant: ${{ secrets.CX_TENANT }}
+          # 改动3：用仓库名显式指定项目，防止 Checkmarx One 端重复建项目
+          project_name: ${{ github.event.repository.name }}
+          # --output-name 保证产物名为 cx_result.sarif（与上传步骤一致）
+          additional_params: --report-format sarif --output-name cx_result
+
+      - name: Upload SARIF file
+        if: steps.creds.outputs.present == 'true'
+        # 与仓库其它 SARIF 工作流一致，使用 v4
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          # 改动4：category 区分不同扫描器，便于在 Security 面板分组展示
+          #        文件名须与上一步 --output-path 生成的 cx_result.sarif 一致
+          sarif_file: cx_result.sarif
+          category: checkmarx
