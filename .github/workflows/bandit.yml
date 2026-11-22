@@ -1,5 +1,7 @@
-# Bandit（PyCQA）安全审计：Python 源码 SAST，结果上传 Code Scanning。
-# 本地对应门禁：scripts/audit.py（见 .dsh/skills/pre-commit-audit/SKILL.md）
+# Bandit（PyCQA）安全审计：Python 源码 SAST，HIGH 级发现阻断合并。
+# 不用 PyCQA/bandit-action@v1：其内部 setup-python 固定 Python 3.8，
+# 新 runner 镜像（Ubuntu 26.04）已无 3.8，检查在装环境阶段即失败（PR #52 红灯根因）。
+# 本地对应门禁：scripts/audit.py（见 .dsh/skills/pre-commit-audit/SKILL.md）。
 name: Bandit 安全审计
 on:
   push:
@@ -14,7 +16,67 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: PyCQA/bandit-action@v1
+
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          severity: "medium"
+
+      - name: 安装 Bandit
+        run: pip install bandit
+
+      - name: 扫描（仅 HIGH；报告落 JSON，失败交给门禁步骤）
+        run: bandit -q -lll -r packages scripts -f json -o bandit.json || true; test -s bandit.json
+
+      - name: JSON 报告转 SARIF
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          data = json.loads(pathlib.Path("bandit.json").read_text(encoding="utf-8"))
+          results = data.get("results", [])
+          ws = "/home/runner/work/reco/reco/"
+          def uri(name):
+              n = name.replace("\\", "/")
+              return n.split(ws)[-1] if ws in n else n.split("/")[-1]
+          sarif = {
+              "version": "2.1.0",
+              "runs": [{
+                  "tool": {"driver": {"name": "Bandit", "version": "1.7", "rules": []}},
+                  "results": [
+                      {
+                          "ruleId": r.get("test_id", "B000"),
+                          "level": "error",
+                          "message": {"text": r.get("issue_text", "")},
+                          "locations": [{
+                              "physicalLocation": {
+                                  "artifactLocation": {"uri": uri(r.get("filename", ""))},
+                                  "region": {"startLine": (r.get("line_range") or [0])[0]},
+                              }
+                          }],
+                      }
+                      for r in results
+                  ],
+              }],
+          }
+          pathlib.Path("bandit.sarif").write_text(json.dumps(sarif), encoding="utf-8")
+          print("HIGH 级发现:", len(results))
+          PY
+
+      - name: 上传 SARIF
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: bandit.sarif
+          category: bandit
+
+      - name: 门禁（HIGH 级发现即失败）
+        run: |
+          python - <<'PY'
+          import json, pathlib, sys
+          data = json.loads(pathlib.Path("bandit.json").read_text(encoding="utf-8"))
+          results = data.get("results", [])
+          for r in results:
+              loc = "%s:%s" % (r.get("filename"), (r.get("line_range") or [0])[0])
+              print("::error::%s %s %s" % (r.get("test_id"), loc, r.get("issue_text")))
+          if results:
+              sys.exit("Bandit 发现 %d 个 HIGH 级问题，阻断合并" % len(results))
+          print("Bandit：无 HIGH 级发现")
+          PY
