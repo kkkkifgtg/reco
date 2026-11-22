@@ -25,18 +25,59 @@ from .graph import empty_graph
 DEFAULT_EVIDENCE_FLOOR = 0.35
 
 # 前缀 → 值映射（value 取 alias 末段；unknown 兜底由留空逻辑保证）
-_ROLE_MAP = {"attack": "攻", "receive": "受", "switch": "互攻", "both": "双性", "neutral": "无明确分工"}
-_AGE_MAP = {"peer": "同龄", "older": "年上", "younger": "年下", "gap": "跨代"}
-_EDGE_TYPE_MAP = {"dominance": "支配-服从", "equal": "对等", "protective": "保护", "exploitative": "利用"}
-_CONSENT_MAP = {"voluntary": "自愿", "semi": "半自愿", "non": "非自愿", "forced_shift": "被迫转化"}
-_TOPOLOGY_MAP = {"one_on_one": "1v1", "one_to_n": "1vN", "n_to_n": "NvN", "ensemble": "群像", "triangle": "三角"}
-_POWER_MAP = {"equal": "对等", "strong_top": "强攻弱受", "strong_bottom": "弱攻强受", "mutual_dom": "双向支配"}
-_EVOLUTION_MAP = {"stable": "稳定", "worsen": "单向恶化", "sink": "双向沉沦", "redemption": "救赎", "reversal": "反转"}
+# —— 值映射表 ——
+# 键 = 标签 id 的末段（与 seed 里的真实中文/digit 末段一致），值 = 展示名。
+# 修复前这里用英文键（attack/peer/one_on_one...），而真实标签末段是中文，
+# 导致 8 维度中无一能映射上（issue #68）。英文键保留为兼容别名。
+_ROLE_MAP = {
+    "攻": "攻", "受": "受", "互攻": "互攻", "双性": "双性", "无明确分工": "无明确分工",
+    "attack": "攻", "receive": "受", "switch": "互攻", "both": "双性", "neutral": "无明确分工",
+}
+_AGE_MAP = {
+    "同龄": "同龄", "年上": "年上", "年下": "年下", "跨代": "跨代",
+    "peer": "同龄", "older": "年上", "younger": "年下", "gap": "跨代",
+}
+_EDGE_TYPE_MAP = {
+    "支配-服从": "支配-服从", "对等": "对等", "保护": "保护", "利用": "利用",
+    "dominance": "支配-服从", "equal": "对等", "protective": "保护", "exploitative": "利用",
+}
+_CONSENT_MAP = {
+    "自愿": "自愿", "半自愿": "半自愿", "非自愿": "非自愿", "被迫转化": "被迫转化", "逐渐沦陷": "逐渐沦陷",
+    "voluntary": "自愿", "semi": "半自愿", "non": "非自愿", "forced_shift": "被迫转化",
+}
+_TOPOLOGY_MAP = {
+    "1v1": "1v1", "1vN": "1vN", "NvN": "NvN", "群像": "群像", "三角": "三角",
+    "one_on_one": "1v1", "one_to_n": "1vN", "n_to_n": "NvN", "ensemble": "群像", "triangle": "三角",
+}
+_POWER_MAP = {
+    "对等": "对等", "强攻弱受": "强攻弱受", "弱攻强受": "弱攻强受", "双向支配": "双向支配", "反转型": "反转型",
+    "equal": "对等", "strong_top": "强攻弱受", "strong_bottom": "弱攻强受", "mutual_dom": "双向支配",
+}
+_EVOLUTION_MAP = {
+    "稳定": "稳定", "单向恶化": "单向恶化", "双向沉沦": "双向沉沦", "救赎": "救赎", "反转": "反转",
+    "stable": "稳定", "worsen": "单向恶化", "sink": "双向沉沦", "redemption": "救赎", "reversal": "反转",
+}
 
 # 本模型认识的前缀（其余交给标签/画像模型，不入关系依据）
 _KNOWN_PREFIXES = frozenset(
     ("role", "age", "archetype", "body", "rel", "mech", "consent", "topology", "power", "evolution")
 )
+
+# 标签 id 前缀 → 维度名：真实 seed 用缩写（top./cons./pow./evo./arch.），
+# 代码内部用全称。修复前不认缩写，导致 6/8 维度收不到任何标签（issue #68）。
+_PREFIX_ALIASES = {
+    "top": "topology",
+    "cons": "consent",
+    "pow": "power",
+    "evo": "evolution",
+    "arch": "archetype",
+}
+
+
+def _dimension_of(tag_id: str) -> str:
+    """标签 id → 维度名：把缩写前缀规范化为全称（role./age. 等本就一致）。"""
+    prefix = tag_id.split(".", 1)[0] if "." in tag_id else ""
+    return _PREFIX_ALIASES.get(prefix, prefix)
 
 
 def _is_number(value: Any) -> bool:
@@ -44,12 +85,16 @@ def _is_number(value: Any) -> bool:
 
 
 def _best(weights: dict[str, float], prefix: str, floor: float) -> tuple[str | None, float]:
-    """取该前缀下权重最高且过阈值的 alias 末段；无合格者返回 None。"""
+    """取该维度下权重最高且过阈值的 alias 末段；无合格者返回 None。
+
+    weights 是**已经按维度分组**的 {tag_id: 权重}（见 extract_relation_graph 的
+    consumed 结构）。因此这里不能再按 prefix 二次过滤——真实标签前缀是缩写
+    （top./cons.），与内部全称（topology/consent）不同，过滤会把全部条目滤掉
+    （issue #68）。prefix 参数保留仅为可读性与签名兼容。
+    """
     best_id: str | None = None
     best_w = -1.0
     for tag_id, w in weights.items():
-        if not tag_id.startswith(prefix + "."):
-            continue
         if w > best_w:
             best_id, best_w = tag_id, w
     if best_id is None or best_w < floor:
@@ -74,7 +119,7 @@ def extract_relation_graph(
     # 消费全部已识别前缀的 alias：依据必记（含未过阈值者），权重计入置信
     consumed: dict[str, dict[str, float]] = {}
     for tag_id, w in weights.items():
-        prefix = tag_id.split(".", 1)[0] if "." in tag_id else ""
+        prefix = _dimension_of(tag_id)  # 缩写前缀（top./cons.…）规范化为全称
         if prefix not in _KNOWN_PREFIXES:
             continue
         basis.add(f"alias:{tag_id}")
