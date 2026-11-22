@@ -1,6 +1,6 @@
 [project]
 name = "reco"
-version = "0.0.0"
+version = "0.1.0"
 description = "reco —— 本地小说推荐程序（monorepo 工作区根，非可安装包）"
 requires-python = ">=3.12"
 dependencies = []

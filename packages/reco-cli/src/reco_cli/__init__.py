@@ -8,7 +8,7 @@ import sys
 
 __all__ = ["main"]
 
-__version__ = "0.2.0"
+__version__ = "0.1.0"
 
 _SUBCOMMANDS = ("report", "scan", "extract", "recommend", "feedback", "explain", "replay", "eval")
 
