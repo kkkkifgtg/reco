@@ -32,7 +32,6 @@ QPushButton {{
     padding: 8px 12px;
 }}
 QPushButton:hover {{ background: {OVERLAY}; }}
-QPushButton:pressed {{ background: {BG}; }}
 QPushButton#primary {{ background: {ACCENT}; color: #ffffff; border: none; }}
 QPushButton#primary:hover {{ background: #3f78e0; }}
 QPushButton#danger {{ background: transparent; color: {DANGER}; border: 1px solid {DANGER}; }}
