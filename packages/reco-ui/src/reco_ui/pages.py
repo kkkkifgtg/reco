@@ -790,3 +790,31 @@ class ZonePage(QWidget):
         else:
             menu.addAction("移到候选池")
         return menu
+
+
+# ---------------------------------------------------------------- proposals 待确认（#48）
+def proposal_rows(store) -> list[dict]:
+    """proposals 待确认列表（UI 行）：只读 pending，candidate/count 从 payload 取。
+
+    无 Store 或无提案 → 空列表（诚实降级，不伪造行）。
+    """
+    if store is None:
+        return []
+    from reco_labels.auto_tag import StoreAdapter
+
+    adapter = StoreAdapter(store)
+    rows: list[dict] = []
+    for p in adapter.iter_proposals():
+        if p.status != "pending":
+            continue
+        payload = dict(p.payload or {})
+        rows.append({
+            "proposal_id": p.proposal_id,
+            "candidate": str(payload.get("candidate") or p.candidate or ""),
+            "count": int(payload.get("count") or 0),
+            "threshold": int(payload.get("threshold") or 0),
+            "kind": p.kind,
+            "status": p.status,
+            "created_at": p.created_at,
+        })
+    return rows
