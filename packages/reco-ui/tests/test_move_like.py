@@ -350,3 +350,138 @@ def test_recommend_like_on_already_moved_book_is_idempotent_noop(qapp, store, tm
     assert f.is_file(), "文件保持在 liked/ 原位"
     evs = [e[0] for e in _read_events(store)]
     assert evs == ["file_added"], f"不重复落移动事件，实况: {evs}"
+
+
+def _seed_zone_file(store, tmp_path, zone, name, content="合成正文，不含真实作品。"):
+    """在指定专区落真实文件 + file_added（与 import/scan 同构）。同 size+同规范名
+    → dedup_key 相同 → 复用同一 book_id，用于构造「同书双区各一份」的真实形态。"""
+    from pathlib import Path
+
+    from reco_store import dedup_key, normalize_book_name
+
+    d = tmp_path / "data" / zone
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / name
+    f.write_text(content, encoding="utf-8")
+    st = f.stat()
+    store.append_event("file_added", payload={
+        "path": str(f), "zone": zone, "ext": f.suffix,
+        "size_bytes": int(st.st_size), "mtime_ns": int(st.st_mtime_ns),
+        "st_dev": int(st.st_dev), "st_ino": int(st.st_ino),
+        "display_name": name, "normalized_name": normalize_book_name(name),
+        "dedup_key": dedup_key(int(st.st_size), name),
+    }, occurred_at=NOW, config_fingerprint="gui/seed/1", actor="system")
+    return f
+
+
+def test_recommend_like_only_affects_selected_row(qapp, store, tmp_path):
+    """缺陷1：多行推荐表，只点选中行，未选中行必须原样不动（不整排标记）。"""
+    from reco_ui.app import RecommendPage
+    from reco_ui.qt import QApplication, QThreadPool
+
+    f1 = _seed_zone_file(store, tmp_path, "candidate", "book-one.txt", "第一本。")
+    f2 = _seed_zone_file(store, tmp_path, "candidate", "book-two.txt", "第二本。")
+    f3 = _seed_zone_file(store, tmp_path, "candidate", "book-three.txt", "第三本。")
+
+    rows = [
+        RankRow(book_id="b1", score=0.9, rank=1,
+                reasons=(Reason(axis="tag", contribution=0.5, source="similarity"),),
+                is_exploration=False),
+        RankRow(book_id="b2", score=0.8, rank=2,
+                reasons=(Reason(axis="tag", contribution=0.4, source="similarity"),),
+                is_exploration=False),
+        RankRow(book_id="b3", score=0.7, rank=3,
+                reasons=(Reason(axis="tag", contribution=0.3, source="similarity"),),
+                is_exploration=False),
+    ]
+    names = {"b1": "book-one.txt", "b2": "book-two.txt", "b3": "book-three.txt"}
+
+    page = RecommendPage(store, data_root=str(tmp_path / "data"))
+    page.set_rows(rows, names)
+    page.table.selectRow(0)  # 只选中第一行
+    page.btn_like.click()
+    QThreadPool.globalInstance().waitForDone(8000)
+    QApplication.processEvents()
+
+    liked = tmp_path / "data" / "liked"
+    assert (liked / "book-one.txt").is_file(), "选中行文件必须真移动进 liked/"
+    assert f2.exists() and f3.exists(), "未选中行的文件必须原地保留"
+    zone_by_path = {p: z for p, z in _read_files(store)}
+    assert zone_by_path[str(liked / "book-one.txt")] == "liked", "选中行 db zone=liked"
+    assert zone_by_path[str(f2)] == "candidate", "未选中 book-two 不得被标记"
+    assert zone_by_path[str(f3)] == "candidate", "未选中 book-three 不得被标记"
+    evs = [e[0] for e in _read_events(store)]
+    assert evs.count("file_moved") == 1, f"只落一条 file_moved（只动一本），实况: {evs}"
+    page.deleteLater()
+
+
+def test_recommend_like_dual_zone_moves_candidate_copy(qapp, store, tmp_path):
+    """缺陷2：双区同书（同 book_id，liked+candidate 各一份文件），点推荐行「标为喜欢」，
+    必须把 candidate 副本真移动出 candidate/ 进 liked/，而非源查询命中 liked 行被
+    move_book_to_liked 判为幂等 no-op（用户所见：书在「我喜欢」里但文件没进 liked/）。"""
+    from reco_ui.app import RecommendPage
+    from reco_ui.qt import QApplication, QThreadPool
+
+    # 同 size+同规范名 → dedup_key 相同 → 共享同一 book_id；两行 files（liked+candidate）
+    lk = _seed_zone_file(store, tmp_path, "liked", "dup-book.txt", "同内容。")
+    cd = _seed_zone_file(store, tmp_path, "candidate", "dup-book.txt", "同内容。")
+
+    # 校验确实共享同一 book_id（否则本测没构造出双区同书）
+    conn = store.read_conn()
+    try:
+        bids = conn.execute(
+            "SELECT DISTINCT book_id FROM files WHERE present=1").fetchall()
+    finally:
+        conn.close()
+    assert len(bids) == 1, f"两份文件必须共享同一 book_id 才是双区同书，实况 {bids}"
+
+    page = RecommendPage(store, data_root=str(tmp_path / "data"))
+    page.set_rows(GOLD_ROWS, {"b1": "dup-book.txt"})
+    page.table.selectRow(0)
+    page.btn_like.click()
+    QThreadPool.globalInstance().waitForDone(8000)
+    QApplication.processEvents()
+
+    # candidate 副本必须被移走（真移动，不是 no-op 留在 candidate/）
+    assert not cd.exists(), "candidate 副本必须被移出 candidate/（真移动）"
+    liked = tmp_path / "data" / "liked"
+    liked_names = {p.name for p in liked.iterdir()}
+    assert "dup-book.txt" in liked_names, f"原 liked 副本保留，实况 {liked_names}"
+    assert "dup-book(1).txt" in liked_names, \
+        f"candidate 副本按冲突语义改名进 liked/，实况 {liked_names}"
+    # db：不残留 candidate 行，该书全部 files 落 liked zone
+    rows_db = _read_files(store)
+    cand_rows = [r for r in rows_db if r[1] == "candidate"]
+    assert cand_rows == [], f"不得残留 candidate 行，实况 {rows_db}"
+    assert all(z == "liked" for _p, z in rows_db), f"该书应全部落 liked，实况 {rows_db}"
+    evs = [e[0] for e in _read_events(store)]
+    assert evs.count("file_moved") >= 1, f"必须落 file_moved 事件，实况 {evs}"
+    page.deleteLater()
+
+
+def test_candidate_zone_like_only_selected_row(qapp, store, tmp_path):
+    """缺陷1 另一入口：候选池页右键「标为喜欢」，只影响选中行，未选中行原样不动。"""
+    from reco_ui.pages import ZonePage
+    from reco_ui.qt import QApplication, QThreadPool
+
+    f1 = _seed_zone_file(store, tmp_path, "candidate", "zone-a.txt", "A。")
+    f2 = _seed_zone_file(store, tmp_path, "candidate", "zone-b.txt", "B。")
+    f3 = _seed_zone_file(store, tmp_path, "candidate", "zone-c.txt", "C。")
+
+    cand = ZonePage("candidate", store, data_root=str(tmp_path / "data"))
+    cand.load_now()
+    assert cand.row_count() == 3, f"应有三行，实况 {cand.row_count()}"
+
+    assert cand.move_selected_book_to_liked(0), "移动发起必须成功"
+    QThreadPool.globalInstance().waitForDone(8000)
+    QApplication.processEvents()
+
+    liked = tmp_path / "data" / "liked"
+    assert (liked / "zone-a.txt").is_file(), "选中行必须真移动进 liked/"
+    assert f2.exists() and f3.exists(), "未选中行文件原地保留"
+    zone_by_path = {p: z for p, z in _read_files(store)}
+    assert zone_by_path[str(f2)] == "candidate", "未选中 zone-b 不得被标记"
+    assert zone_by_path[str(f3)] == "candidate", "未选中 zone-c 不得被标记"
+    evs = [e[0] for e in _read_events(store)]
+    assert evs.count("file_moved") == 1, f"只落一条 file_moved，实况 {evs}"
+
