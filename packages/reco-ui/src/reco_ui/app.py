@@ -448,11 +448,27 @@ class MainWindow(QMainWindow):
         """
         if self._store is None:
             return {}
+        # 契约：#11.7 热集只预热 zone 页；recommend/profile 走按需加载
+        # （画像页首次点进去由 _on_nav → page_requested → ProfileLoader 装载）
         return {
             pid: self._make_zone_job(pid)
             for pid in ("liked", "candidate")
             if pid in self._pages
         }
+
+    def _make_profile_job(self, page_id: str):
+        def job() -> bool:
+            from reco_ui.pages import profile_rows
+
+            try:
+                data = profile_rows(self._store)
+            except Exception:
+                return False
+            page = self._pages.get(page_id)
+            if isinstance(page, ProfilePage):
+                page.apply_profile(data)
+            return True
+        return job
 
     def _make_zone_job(self, page_id: str):
         def job() -> bool:
@@ -498,7 +514,9 @@ class ProfilePage(QWidget):
         title = QLabel("画像")
         title.setObjectName("page-title")
         layout.addWidget(title)
-        self._summary = QLabel("")
+        # #77：初始必须有可见占位——空白页会让用户以为功能不存在
+        # （对比 ZonePage 的 _status 初始值是「待加载」）
+        self._summary = QLabel("画像加载中…（首次打开稍候）")
         self._summary.setObjectName("dim")
         self._summary.setWordWrap(True)
         layout.addWidget(self._summary)
