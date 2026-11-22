@@ -365,6 +365,17 @@ CREATE TABLE IF NOT EXISTS ui_usage(
   uses INTEGER NOT NULL DEFAULT 0,
   last_used TEXT
 );
+
+CREATE TABLE IF NOT EXISTS reading_progress(
+  book_id INTEGER PRIMARY KEY REFERENCES books(book_id),
+  char_offset INTEGER,
+  epub_spine_index INTEGER,
+  epub_block_pos INTEGER,
+  percent REAL,
+  updated_at TEXT NOT NULL,
+  schema_version TEXT NOT NULL,
+  config_fingerprint TEXT NOT NULL
+);
 """
 
 COMPARE_TABLES: tuple[str, ...] = (
@@ -753,6 +764,71 @@ class Store:
         finally:
             conn.close()
         return {r[0]: {"uses": int(r[1]), "last_used": r[2]} for r in rows}
+
+    # ---- reading_progress（RR1/t1；§R4 阅读位置独立表，绝不进口味事件流）----
+
+    def upsert_reading_progress(
+        self,
+        book_id: int,
+        *,
+        ext: str,
+        char_offset: int | None = None,
+        epub_spine_index: int | None = None,
+        epub_block_pos: int | None = None,
+        percent: float,
+        updated_at: str,
+        config_fingerprint: str = "ui/reader/1",
+    ) -> None:
+        """保存阅读位置（book_id 主键单行 upsert）。
+
+        写走单写者队列（submit）；reading_progress 不进事件流、不投影、
+        不参与回放比对（照 ui_usage 先例）。ext 为格式声明，坐标列自证格式。
+        """
+        if not isinstance(ext, str) or not ext.strip():
+            raise ValueError("ext 必须为非空字符串")
+        if not isinstance(updated_at, str) or not updated_at.strip():
+            raise ValueError("updated_at 必须为非空 ISO8601 字符串")
+        if isinstance(percent, bool) or not isinstance(percent, (int, float)):
+            raise ValueError("percent 必须为数值")
+
+        def job(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT INTO reading_progress(book_id, char_offset, epub_spine_index,"
+                " epub_block_pos, percent, updated_at, schema_version, config_fingerprint)"
+                " VALUES(?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(book_id) DO UPDATE SET char_offset = excluded.char_offset,"
+                " epub_spine_index = excluded.epub_spine_index,"
+                " epub_block_pos = excluded.epub_block_pos, percent = excluded.percent,"
+                " updated_at = excluded.updated_at,"
+                " schema_version = excluded.schema_version,"
+                " config_fingerprint = excluded.config_fingerprint",
+                (int(book_id), char_offset, epub_spine_index, epub_block_pos,
+                 float(percent), updated_at, SCHEMA_VERSION, config_fingerprint),
+            )
+
+        self.submit(job).result()
+
+    def get_reading_progress(self, book_id: int) -> dict | None:
+        """读单书阅读位置：{char_offset, epub_spine_index, epub_block_pos, percent,
+        updated_at} 或 None（read_conn，WAL 读不阻塞写）。"""
+        conn = self.read_conn()
+        try:
+            row = conn.execute(
+                "SELECT char_offset, epub_spine_index, epub_block_pos, percent, updated_at"
+                " FROM reading_progress WHERE book_id = ?",
+                (int(book_id),),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return {
+            "char_offset": row[0],
+            "epub_spine_index": row[1],
+            "epub_block_pos": row[2],
+            "percent": row[3],
+            "updated_at": row[4],
+        }
 
     def verify_replay(self) -> ReplayReport:
         """ADR-0003：事件流重放进全新库，逐表逐位比对；任何漂移都报告。"""
