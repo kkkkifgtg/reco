@@ -1,5 +1,8 @@
 """T2：reco_cli extract 子命令（红测试）。
 
+跨包集成测试（CODING-STANDARDS §2 显式标注）：本模块 import reco_store，
+独立 venv 只装 reco-cli 时不可运行；全量套件可用 `-m "not integration"` 分组。
+
 覆盖：子命令注册/帮助、JSON 摘要恰四键、每本挑 size_bytes>0 且本机存在的
 present 文件（同书多条 files 行）、全空书如实计 failed 不硬失败、--limit。
 闭环（extract → rank_rows 非空、幂等）在根 tests/test_extract_closed_loop.py。
@@ -15,6 +18,8 @@ from pathlib import Path
 import pytest
 
 from reco_cli import main
+
+pytestmark = pytest.mark.integration
 
 NOW = "2026-11-21T00:00:00+00:00"
 CFG = "t2/cli"
