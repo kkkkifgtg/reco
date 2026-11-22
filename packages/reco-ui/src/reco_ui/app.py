@@ -756,8 +756,12 @@ class RecommendPage(QWidget):
         """W19 N2：「标为喜欢」→ 真移动（推荐源 → liked/；UI 只发起，§11.1）。
 
         book_id 名空间不同（rank 输出 "b<N>"），先解析 db 内真实整数 book_id；
-        file 行缺失（外部删除/仅剩 books 行）时回退书名→liked/ 同名产物，
-        产物不存在则诚实降级不移动（不猜名字映射）。已迁移书的重复点击由
+        源行优先取 candidate 专区——rank 候选集只来自 candidate，推荐页点喜欢
+        就是把 candidate 那份真移动进 liked/。双区同书（liked+candidate 各一份）
+        若按 file_id 排序会命中已存在的 liked 行，被 move_book_to_liked 判为
+        幂等 no-op，candidate 副本永远不被移动（缺陷：能看到书但文件没进 liked/）。
+        无 candidate 行再回退任意专区现存行；file 行全缺失时回退书名→liked/ 同名
+        产物，产物不存在则诚实降级不移动（不猜名字映射）。已迁移书的重复点击由
         move_book_to_liked 幂等护栏吸收（no-op 不落事件）。
         """
         from reco_ui.pages import ZONE_DIR_NAMES, LikeMoveWorker
@@ -771,7 +775,14 @@ class RecommendPage(QWidget):
         try:
             row = conn.execute(
                 "SELECT path, zone FROM files WHERE book_id = ? AND present = 1"
-                " ORDER BY file_id LIMIT 1", (book_id,)).fetchone()
+                " AND zone = 'candidate' LIMIT 1", (book_id,)).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT path, zone FROM files WHERE book_id = ? AND present = 1"
+                    " ORDER BY file_id LIMIT 1", (book_id,)).fetchone()
+            if row is None:
+                like_row = conn.execute(
+                    "SELECT display_name FROM books WHERE book_id = ?", (book_id,)).fetchone()
             if row is None:
                 like_row = conn.execute(
                     "SELECT display_name FROM books WHERE book_id = ?", (book_id,)).fetchone()
