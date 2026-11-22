@@ -56,7 +56,7 @@ _ZONE_DISPLAY = {"liked": "喜欢专区", "candidate": "候选池", "推荐专�
 
 
 def zone_rows(store: Store, zone: str, *, limit: int = 200,
-              offset: int = 0) -> list[tuple]:
+              offset: int = 0, keyword: str = "") -> list[tuple]:
     """专区行读取（独立只读连接；无正文，B 类审计点）。
 
     行 = (book_id, 名称, 大小, 备注)。
@@ -67,12 +67,19 @@ def zone_rows(store: Store, zone: str, *, limit: int = 200,
     """
     conn = store.read_conn()
     try:
+        # #76：keyword 走 SQL LIKE，因此能命中 limit 之外的书（不只是已加载的 200 行）
+        kw = (keyword or "").strip()
+        where = "f.zone = ? AND f.present = 1"
+        params: list = [zone]
+        if kw:
+            where += " AND b.display_name LIKE ?"
+            params.append("%" + kw + "%")
         raw = conn.execute(
             "SELECT b.book_id, b.display_name, b.size_bytes"
             " FROM files f JOIN books b ON b.book_id = f.book_id"
-            " WHERE f.zone = ? AND f.present = 1"
+            f" WHERE {where}"
             " ORDER BY b.book_id LIMIT ? OFFSET ?",
-            (zone, int(limit), int(max(0, offset))),
+            (*params, int(limit), int(max(0, offset))),
         ).fetchall()
         # 该页所有 book_id 在其他专区的分布
         ids = [int(r[0]) for r in raw]

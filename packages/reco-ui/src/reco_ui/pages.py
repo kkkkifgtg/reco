@@ -29,6 +29,7 @@ from reco_ui.qt import (
     QAbstractTableModel,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMenu,
     QModelIndex,
     QObject,
@@ -677,6 +678,9 @@ class ZonePage(QWidget):
     W18 U2：加载中可见反馈 + 失败「重试」入口（mark_failed 不再是死页）。
     """
 
+    # #76：搜索时最多取多少条命中行（搜索是缩小范围，不需要一次拉全部）
+    SEARCH_LIMIT = 500
+
     recommend_requested = pyqtSignal()  # F3：candidate 页「开始推荐」点击
     reload_requested = pyqtSignal()     # U2：「重试」按钮 → 主窗重新发起加载
     refresh_requested = pyqtSignal()    # N1：「刷新」按钮 → 主窗发起目录→库再扫描
@@ -694,6 +698,14 @@ class ZonePage(QWidget):
         title = QLabel("喜欢专区" if zone == "liked" else "候选池专区")
         title.setObjectName("page-title")
         layout.addWidget(title)
+        # #76：搜索框——候选池默认只装 200 行，没有搜索就无法访问其余书
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("搜索书名…（回车过滤）")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.textChanged.connect(self.apply_search)
+        layout.addWidget(self.search_input)
+        self._all_rows: list[tuple] = []   # 未过滤的完整行集合
+        self._total: int | None = None     # 库内真实总数
         self._table = QTableView()
         self._model = ZoneTableModel()
         # #66：悬停显示标签（provider 惰性查库，悬停时才触发）
@@ -865,15 +877,39 @@ class ZonePage(QWidget):
         self._status.setText("已加载")
         self.btn_retry.hide()
 
-    def apply_rows(self, rows, *, total: int | None = None) -> None:
-        """worker 回调装填（UI 线程：只渲染）。
+    def apply_search(self) -> None:
+        """按搜索框关键词过滤已加载行（书名包含即命中，大小写不敏感）。
 
-        #75：total 是库内真实总数。修复前只显示 200 行却不说还有多少，
-        用户以为书库就这么大（candidate 实际 1529 本，87% 被静默隐藏）。
+        关键用途：候选池默认只装 200 行，用户可搜到该页之外的书由主窗重新加载；
+        这里先做已加载行的即时过滤，保证输入即有反馈。
         """
-        self._model.set_rows(rows)
-        self.loaded = True
-        shown = len(rows)
+        raw_kw = self.search_input.text().strip()
+        keyword = raw_kw.casefold()
+        if not keyword:
+            self._model.set_rows(self._all_rows)
+            self._refresh_status(len(self._all_rows))
+            return
+        # #76 关键：有 store 时**查库**而非只过滤已加载行，
+        # 否则默认只装 200 行，第 201 本之后永远搜不到。
+        hits: list[tuple]
+        if self._store is not None:
+            try:
+                from reco_ui.glue import zone_rows as _zr
+
+                hits = _zr(self._store, self.zone, limit=self.SEARCH_LIMIT, keyword=raw_kw)
+            except Exception:
+                hits = [r for r in self._all_rows if keyword in str(r[1]).casefold()]
+        else:
+            hits = [r for r in self._all_rows if keyword in str(r[1]).casefold()]
+        self._model.set_rows(hits)
+        if hits:
+            self._refresh_status(len(hits))
+        else:
+            self._status.setText(f"未找到匹配「{raw_kw}」的书")
+
+    def _refresh_status(self, shown: int) -> None:
+        """状态行：截断时明示真实总数（#75），未截断时报已加载数。"""
+        total = self._total
         if total is not None and total > shown:
             self._status.setText(
                 f"已显示 {shown} / 共 {total} 本（其余未加载，可用搜索缩小范围）")
@@ -881,6 +917,17 @@ class ZonePage(QWidget):
             self._status.setText(f"已加载 {shown} 本")
         else:
             self._status.setText("已加载")
+
+    def apply_rows(self, rows, *, total: int | None = None) -> None:
+        """worker 回调装填（UI 线程：只渲染）。
+
+        #75：total 是库内真实总数。修复前只显示 200 行却不说还有多少，
+        用户以为书库就这么大（candidate 实际 1529 本，87% 被静默隐藏）。
+        """
+        self._all_rows = list(rows)
+        self._total = total
+        self.loaded = True
+        self.apply_search()          # 有搜索词时保持过滤，无则显示全部
         self.btn_retry.hide()
 
     def mark_failed(self, message: str) -> None:
