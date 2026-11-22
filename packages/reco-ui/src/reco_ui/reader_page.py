@@ -22,11 +22,14 @@ from pathlib import Path
 
 from reco_io.perf import perf_span
 from reco_ui.qt import (
+    QHBoxLayout,
     QLabel,
     QObject,
     QPlainTextEdit,
     QPushButton,
     QRunnable,
+    QStackedWidget,
+    QTextBrowser,
     QTextCursor,
     QThreadPool,
     QTimer,
@@ -63,7 +66,8 @@ def _load_payload(path: str) -> dict:
     """池线程加载口径：text 格式全量解码+分块；EPUB 走 spine 解析（T4 接逐章导航）。"""
     source = Path(path)
     if source.suffix.lower() == ".epub":
-        chapters = parse_epub_spine(source)
+        with perf_span("reader.epub.parse"):
+            chapters = parse_epub_spine(source)
         first = chapters[0]
         text = str(first.get("text") or "")
         return {
@@ -147,19 +151,43 @@ class ReaderPage(QWidget):
         self._viewer = QPlainTextEdit()
         self._viewer.setReadOnly(True)
         self._viewer.verticalScrollBar().valueChanged.connect(self._on_scroll)
+        self._browser = QTextBrowser()
+        self._browser.setOpenExternalLinks(False)
+        self._browser.verticalScrollBar().valueChanged.connect(self._on_scroll)
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._viewer)
+        self._stack.addWidget(self._browser)
+        self._btn_prev = QPushButton("上一章")
+        self._btn_prev.clicked.connect(self.prev_chapter)
+        self._btn_next = QPushButton("下一章")
+        self._btn_next.clicked.connect(self.next_chapter)
         self._back = QPushButton("返回")
         self._back.clicked.connect(self._on_back)
+        nav = QHBoxLayout()
+        nav.addWidget(self._back)
+        nav.addStretch(1)
+        nav.addWidget(self._btn_prev)
+        nav.addWidget(self._btn_next)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.addWidget(self._title)
-        layout.addWidget(self._viewer, 1)
+        layout.addWidget(self._stack, 1)
         layout.addWidget(self._status)
-        layout.addWidget(self._back)
+        layout.addLayout(nav)
+        self._update_chapter_buttons()
 
     # ---------------------------------------------------------- 对外读取面（测试/主窗）
     @property
     def viewer(self) -> QPlainTextEdit:
         return self._viewer
+
+    @property
+    def browser(self) -> QTextBrowser:
+        return self._browser
+
+    @property
+    def chapter_index(self) -> int:
+        return self._chapter_index
 
     @property
     def status_text(self) -> str:
@@ -191,7 +219,12 @@ class ReaderPage(QWidget):
         self._loaded_chars = 0
         self._total_chars = 0
         self._loaded = False
+        self._chapter_index = 0
+        self._pending_block_pos = None
         self._viewer.clear()
+        self._browser.clear()
+        self._stack.setCurrentWidget(self._viewer)
+        self._update_chapter_buttons()
         self._save_timer.stop()
         self._title.setText(Path(self._path).name)
         self._status.setText("加载中…")
@@ -220,7 +253,12 @@ class ReaderPage(QWidget):
         self._chunk_index = 0
         self._loaded_chars = 0
         self._total_chars = 0
+        self._chapter_index = 0
+        self._pending_block_pos = None
         self._viewer.clear()
+        self._browser.clear()
+        self._stack.setCurrentWidget(self._viewer)
+        self._update_chapter_buttons()
         self._title.clear()
         self._status.clear()
 
@@ -244,7 +282,10 @@ class ReaderPage(QWidget):
         self._text = str(payload.get("text") or "")
         self._total_chars = len(self._text)
         self._chunks = list(payload.get("chunks") or [])
-        self._install_first_frame(payload.get("progress"))
+        if self._format == "epub":
+            self._install_epub(payload.get("progress"))
+        else:
+            self._install_first_frame(payload.get("progress"))
         self._loaded = True
         self._status.setText("")
 
@@ -274,11 +315,21 @@ class ReaderPage(QWidget):
         self._viewer.setTextCursor(cursor)
         self._viewer.centerCursor()
 
+    def showEvent(self, event) -> None:
+        """重新显示时校准恢复的章内滚动值（首次 open 可能早于页面 show）。"""
+        super().showEvent(event)
+        if self._format == "epub" and self._pending_block_pos is not None:
+            bar = self._browser.verticalScrollBar()
+            bar.setValue(max(0, min(self._pending_block_pos, bar.maximum())))
+
     # ---------------------------------------------------------- 分块追加
     def _on_scroll(self, _value: int) -> None:
         if not self._loaded:
             return
         self._save_timer.start()  # 滚动重启 1s 节流
+        if self._format == "epub":
+            self._pending_block_pos = None  # 用户已自行滚动，别在 show 时回设旧位置
+            return
         self._append_while_near_bottom()
 
     def _near_bottom(self) -> bool:
@@ -312,10 +363,61 @@ class ReaderPage(QWidget):
         cursor.movePosition(QTextCursor.MoveOperation.End)
         cursor.insertText(text)
 
+    # ---------------------------------------------------------- EPUB 章节
+    def _install_epub(self, progress) -> None:
+        """EPUB 首帧：按 spine 序装目标章 HTML；进度命中则恢复章内滚动值。"""
+        self._stack.setCurrentWidget(self._browser)
+        index = int((progress or {}).get("epub_spine_index") or 0)
+        self._chapter_index = max(0, min(index, len(self._chapters) - 1))
+        block_pos = int((progress or {}).get("epub_block_pos") or 0)
+        self._render_chapter(self._chapter_index, block_pos)
+        self._pending_block_pos = block_pos
+        self._update_chapter_buttons()
+        self._close_first_frame()  # reader.first_frame 到此为止
+        self._update_title()
+
+    def _render_chapter(self, index: int, block_pos: int = 0) -> None:
+        """单章 HTML 灌入 QTextBrowser（绝不整本灌入）；强制排版后恢复章内滚动值。"""
+        chapter = self._chapters[index]
+        self._browser.setHtml(str(chapter.get("html") or ""))
+        document = self._browser.document()
+        width = self._browser.viewport().width()
+        document.setTextWidth(width if width > 0 else 640)
+        document.documentLayout().documentSize()  # 强制排版：未 show 也能定位滚动范围
+        bar = self._browser.verticalScrollBar()
+        bar.setValue(max(0, min(int(block_pos or 0), bar.maximum())))
+
+    def prev_chapter(self) -> None:
+        self._switch_chapter(self._chapter_index - 1)
+
+    def next_chapter(self) -> None:
+        self._switch_chapter(self._chapter_index + 1)
+
+    def _switch_chapter(self, index: int) -> None:
+        if self._format != "epub" or not self._chapters:
+            return
+        if not 0 <= index < len(self._chapters):
+            return
+        self._chapter_index = index
+        self._pending_block_pos = 0
+        self._render_chapter(index, 0)
+        self._update_chapter_buttons()
+        self._update_title()
+        if self._loaded:
+            self._save_progress()  # 翻章即落盘（票面：翻页/关窗时保存）
+
+    def _update_chapter_buttons(self) -> None:
+        is_epub = self._format == "epub" and bool(self._chapters)
+        self._btn_prev.setVisible(is_epub)
+        self._btn_next.setVisible(is_epub)
+        if is_epub:
+            self._btn_prev.setEnabled(self._chapter_index > 0)
+            self._btn_next.setEnabled(self._chapter_index < len(self._chapters) - 1)
+
     # ---------------------------------------------------------- 进度
     def _percent_for(self, offset: int) -> float:
         if self._format == "epub" and self._chapters:
-            return min(1.0, 1.0 / len(self._chapters))  # T4：改为按 spine 序累计
+            return min(1.0, (self._chapter_index + 1) / len(self._chapters))
         if self._total_chars <= 0:
             return 0.0
         return max(0.0, min(1.0, offset / self._total_chars))
@@ -330,8 +432,8 @@ class ReaderPage(QWidget):
             "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         if self._format == "epub":
-            fields["epub_spine_index"] = 0
-            fields["epub_block_pos"] = int(self._viewer.verticalScrollBar().value())
+            fields["epub_spine_index"] = self._chapter_index
+            fields["epub_block_pos"] = int(self._browser.verticalScrollBar().value())
         else:
             fields["char_offset"] = offset
         ext = Path(self._path).suffix.lower().lstrip(".") if self._path else ""
@@ -357,5 +459,7 @@ class ReaderPage(QWidget):
         name = Path(self._path).name
         suffix = ""
         if self._format == "epub" and self._chapters:
-            suffix = f" · {self._chapters[0].get('title', '')}"
+            chapter = self._chapters[self._chapter_index]
+            suffix = (f" · {chapter.get('title', '')}"
+                      f" · 第 {self._chapter_index + 1}/{len(self._chapters)} 章")
         self._title.setText(f"{name} · {int(percent * 100)}%{suffix}")

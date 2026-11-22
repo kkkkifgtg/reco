@@ -84,9 +84,12 @@ def make_docx(path: Path, paragraphs: list[str]) -> Path:
     return path
 
 
-def make_epub(path: Path, chapters: list[tuple[str, str]]) -> Path:
-    """最小合法 EPUB：container.xml + OPF + N 章 XHTML。"""
+def make_epub(
+    path: Path, chapters: list[tuple[str, str]], *, titles: list[str] | None = None
+) -> Path:
+    """最小合法 EPUB：container.xml + OPF + N 章 XHTML；titles 给各章 <title>/<h1>。"""
     names = [name for name, _ in chapters]
+    title_by = dict(zip(names, titles)) if titles else {}
     ids = {name: f"id{i}" for i, name in enumerate(names)}
     manifest = "".join(
         f'<item id="{ids[name]}" href="{name}" media-type="application/xhtml+xml"/>'
@@ -108,10 +111,11 @@ def make_epub(path: Path, chapters: list[tuple[str, str]]) -> Path:
         zf.writestr("META-INF/container.xml", container)
         zf.writestr("OEBPS/content.opf", opf)
         for name, body in chapters:
+            title = title_by.get(name, name)
             markup = (
                 '<?xml version="1.0" encoding="utf-8"?>'
-                f'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>{name}</title></head>'
-                f"<body><h1>{name}</h1><p>{body}</p></body></html>"
+                f'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>{title}</title></head>'
+                f"<body><h1>{title}</h1><p>{body}</p></body></html>"
             )
             zf.writestr(f"OEBPS/{name}", markup.encode("utf-8"))
     return path
@@ -368,10 +372,114 @@ def test_four_formats_open_close_write_nothing(page, store, tmp_path):
     for path, bid in books.items():
         _open_and_wait(page, path, bid)
         assert page.status_text == ""
-        assert page.viewer.toPlainText(), f"{path.name} 未渲染任何文本"
+        if path.suffix.lower() == ".epub":
+            assert page.browser.toPlainText(), f"{path.name} 未渲染任何文本"
+        else:
+            assert page.viewer.toPlainText(), f"{path.name} 未渲染任何文本"
         page.close_book()
     after = sorted(p.name for p in tmp_path.iterdir())
     assert after == before  # R2：零落盘
+
+
+# ---------------------------------------------------------- EPUB 章节
+
+
+def _make_epub_book(store, tmp_path, *, size: int, ino: int, long_second: bool = False):
+    body = "第二章正文"
+    if long_second:
+        body += ("\n\n" + "文" * 200) * 40
+    path = make_epub(
+        tmp_path / f"epub-{ino}.epub",
+        [("c1.xhtml", "第一章正文"), ("c2.xhtml", body), ("c3.xhtml", "第三章正文")],
+        titles=["第一章 开始", "第二章 遇见", "第三章 尾声"],
+    )
+    book_id = _seed_book(store, name=f"epub-{ino}.epub", ino=ino, ext=".epub", size=size)
+    return path, book_id
+
+
+def test_epub_first_chapter_renders_title_and_body(page, store, tmp_path):
+    path, bid = _make_epub_book(store, tmp_path, size=101, ino=21)
+    _open_and_wait(page, path, bid)
+    text = page.browser.toPlainText()
+    assert "第一章 开始" in text
+    assert "第一章正文" in text
+    assert "第二章正文" not in text  # 单章渲染，绝不整本灌入
+    assert page._stack.currentWidget() is page.browser
+    assert "epub-21.epub" in page.title_text
+    assert "第一章 开始" in page.title_text
+    assert page._btn_next.isHidden() is False
+    assert page._btn_prev.isEnabled() is False
+    assert page._btn_next.isEnabled() is True
+
+
+def test_epub_next_and_prev_chapter_switch(page, store, tmp_path):
+    path, bid = _make_epub_book(store, tmp_path, size=102, ino=22)
+    _open_and_wait(page, path, bid)
+
+    page.next_chapter()
+    assert page.chapter_index == 1
+    assert "第二章正文" in page.browser.toPlainText()
+    assert "第一章正文" not in page.browser.toPlainText()
+    assert "第二章 遇见" in page.title_text
+    saved = store.get_reading_progress(bid)
+    assert saved is not None
+    assert saved["epub_spine_index"] == 1  # 翻章即落盘（票面：翻页时保存）
+    assert saved["char_offset"] is None
+
+    page.next_chapter()
+    assert page.chapter_index == 2
+    assert page._btn_next.isEnabled() is False
+
+    page.prev_chapter()
+    assert page.chapter_index == 1
+    assert "第二章正文" in page.browser.toPlainText()
+
+
+def test_epub_reopen_restores_spine_index_and_scroll(page, store, tmp_path):
+    path, bid = _make_epub_book(store, tmp_path, size=103, ino=23, long_second=True)
+    store.upsert_reading_progress(
+        bid, ext="epub", epub_spine_index=1, epub_block_pos=120, percent=0.5, updated_at=NOW,
+    )
+    _open_and_wait(page, path, bid)
+
+    assert page.chapter_index == 1
+    text = page.browser.toPlainText()
+    assert "第二章 遇见" in text
+    assert "第二章正文" in text
+    bar = page.browser.verticalScrollBar()
+    assert bar.maximum() > 120
+    assert bar.value() == 120  # 章内滚动值恢复（spine_index + 章内位置）
+
+
+def test_text_format_hides_chapter_buttons(page, store, tmp_path):
+    path = _write_txt(tmp_path / "plain.txt", "正文")
+    bid = _seed_book(store, name="plain.txt", ino=24, size=104)
+    _open_and_wait(page, path, bid)
+    assert page._btn_prev.isHidden() is True
+    assert page._btn_next.isHidden() is True
+    assert page._stack.currentWidget() is page.viewer
+
+
+def test_epub_parse_perf_span(store, tmp_path, monkeypatch):
+    from reco_io import perf as perf_mod
+
+    monkeypatch.setattr(perf_mod, "perf_enabled", True)
+    path, bid = _make_epub_book(store, tmp_path, size=105, ino=25)
+
+    from reco_ui.qt import QThreadPool
+    from reco_ui.reader_page import ReaderPage
+
+    pg = ReaderPage(store)
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            pg.open_book(path, bid)
+            assert _pump_until(lambda: pg.loaded)
+    finally:
+        pg.close_book()
+        pg.deleteLater()
+        QThreadPool.globalInstance().waitForDone(5000)
+    assert "phase=reader.epub.parse ms=" in err.getvalue()
 
 
 # ---------------------------------------------------------- RECO_PERF 打点
