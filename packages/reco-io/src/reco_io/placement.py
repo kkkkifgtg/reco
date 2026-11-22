@@ -123,7 +123,7 @@ def _conflict_free_name(dst_dir: Path, name: str) -> Path:
     """确定性改名去冲突：book.txt -> book(1).txt -> book(2).txt ..."""
     stem, suffix = Path(name).stem, Path(name).suffix
     n = 1
-    while (candidate := dst_dir / f"{stem}({n}){suffix}").exists():
+    while (candidate := dst_dir / f"{stem}({n}){suffix}").exists() or candidate.is_symlink():
         n += 1
     return candidate
 
@@ -149,7 +149,10 @@ def place_by_hardlink(
     dst = dst_dir / src.name
 
     # 契约步骤 2：目标已存在 → 指纹判等：等则跳过，不等则改名去冲突。
-    if dst.exists():
+    # symlink（含悬空）一律视为冲突后改名：绝不跟随链接写到目标外（CWE-61）。
+    if dst.is_symlink():
+        dst = _conflict_free_name(dst_dir, src.name)
+    elif dst.exists():
         dst_st = stat(dst)
         if (dst_st.st_size, dst_st.st_mtime_ns) == (src_st.st_size, src_st.st_mtime_ns):
             return PlacementResult(
