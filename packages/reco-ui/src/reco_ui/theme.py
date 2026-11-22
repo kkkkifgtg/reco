@@ -55,6 +55,11 @@ QListWidget::item:selected:!active {{ color: {TEXT_DIM}; }}
 QListWidget::item:selected:active {{ background: {ACCENT}; color: #ffffff; }}
 QTableView:!active {{ selection-background-color: {OVERLAY}; }}
 QTableView {{ gridline-color: {OVERLAY}; selection-background-color: {SURFACE}; selection-color: {TEXT}; }}
+QPlainTextEdit, QTextBrowser {{
+    background: {BG}; color: {TEXT};
+    border: 1px solid {OVERLAY}; border-radius: {RADIUS_MD}px;
+    padding: 12px; selection-background-color: {ACCENT};
+}}
 QHeaderView::section {{
     background: {SURFACE}; color: {TEXT_DIM};
     border: none; border-bottom: 1px solid {OVERLAY};

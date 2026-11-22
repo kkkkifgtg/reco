@@ -552,6 +552,7 @@ class ZonePage(QWidget):
     recommend_requested = pyqtSignal()  # F3：candidate 页「开始推荐」点击
     reload_requested = pyqtSignal()     # U2：「重试」按钮 → 主窗重新发起加载
     refresh_requested = pyqtSignal()    # N1：「刷新」按钮 → 主窗发起目录→库再扫描
+    reader_requested = pyqtSignal(str, object)  # RR1：双击作品 → 主窗打开阅读页 (path, book_id)
 
     def __init__(self, zone: str, store=None, parent=None, *, data_root=None) -> None:
         super().__init__(parent)
@@ -568,6 +569,7 @@ class ZonePage(QWidget):
         self._table = QTableView()
         self._model = ZoneTableModel()
         self._table.setModel(self._model)
+        self._table.doubleClicked.connect(self._on_double_clicked)  # RR1 T5：双击进阅读页
         layout.addWidget(self._table, 1)
         self._status = QLabel("待加载")
         self._status.setObjectName("dim")
@@ -601,6 +603,41 @@ class ZonePage(QWidget):
     def _open_folder(self) -> None:
         """「打开文件夹」按钮（W16 F2）：data_root + zone 映射，ensure_zones 创建。"""
         open_zone_folder(self._data_root, self.zone)
+
+    # —— RR1 T5：双击作品 → 阅读页（查源路径；无源则状态行诚实提示）——
+    def _present_path(self, book_id: int) -> str | None:
+        """本专区该书的现存路径；无 files(present=1) 行 → None（不猜名字映射）。"""
+        if self._store is None:
+            return None
+        conn = self._store.read_conn()
+        try:
+            row = conn.execute(
+                "SELECT path FROM files WHERE book_id = ? AND zone = ? AND present = 1"
+                " ORDER BY file_id LIMIT 1", (int(book_id), self.zone)).fetchone()
+        finally:
+            conn.close()
+        return str(row[0]) if row is not None else None
+
+    def _on_double_clicked(self, index) -> None:
+        """双击行 → reader_requested(path, book_id)；行已失效/无源文件只报状态。"""
+        if self._store is None or index is None or not index.isValid():
+            return
+        row = index.row()
+        if not (0 <= row < self._model.rowCount()):
+            return
+        try:
+            rows = zone_page_rows(self._store, self.zone)
+        except Exception as exc:  # UI 只收类名，正文/底层消息不上屏（§R3）
+            self._status.setText(f"打开失败：{type(exc).__name__}")
+            return
+        if not (0 <= row < len(rows)):
+            return
+        book_id = int(rows[row][0])
+        path = self._present_path(book_id)
+        if path is None or not os.path.isfile(path):  # 已移动/删除：不打开、只诚实提示
+            self._status.setText(f"文件缺失，无法打开：{rows[row][1]}")
+            return
+        self.reader_requested.emit(path, book_id)
 
     # —— W16 F1：拖拽导入 ——
     def dragEnterEvent(self, event) -> None:  # noqa: N802（Qt 命名）

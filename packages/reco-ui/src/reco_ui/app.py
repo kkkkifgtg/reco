@@ -39,6 +39,7 @@ from reco_ui.pages import (
     zone_page_rows,
 )
 from reco_ui.preload import Preloader
+from reco_ui.reader_page import ReaderPage
 from reco_ui.tables import RankTableModel
 from reco_ui.theme import apply_dark_theme
 
@@ -119,6 +120,10 @@ class MainWindow(QMainWindow):
         self._inflight: set[str] = set()  # 坑 2：in-flight 去重
         self._preloader = None  # W12b：骨架构建完成后在 _build_skeleton 末尾启动
         self._loaders: dict[str, ZoneLoader] = {}  # 持有运行中 loader 的 Python 引用（QThreadPool 不持包装）
+        # RR1 T5：阅读页常驻实例（换书复用；不进 PAGE_ORDER/导航）+ 来源页记录。
+        self._reader = None
+        self._reader_return_widget = None
+        self._reader_return_title = ""
         self._nav = QListWidget()
         self._nav.setObjectName("nav")
         self._stack = QStackedWidget()
@@ -146,6 +151,11 @@ class MainWindow(QMainWindow):
             self._pages[pid] = page
             self._stack.addWidget(page)
             QListWidgetItem(PAGE_LABELS[pid], self._nav)
+        # RR1 T5：阅读页加入 stack（不进 PAGE_ORDER/nav），back_requested → 返回原页。
+        self._reader = ReaderPage(self._store)
+        self._stack.addWidget(self._reader)
+        self._reader.back_requested.connect(self._close_reader)
+        self._pages["reader"] = self._reader  # ui_usage("reader") 预热热集可解析（PAGE_ORDER 仍 4 页）
         self._nav.currentRowChanged.connect(self._on_nav)
         self.page_requested.connect(self._start_load)  # UI 线程只发起（§11.1）
         self._nav.setCurrentRow(2)  # 默认推荐专区（恒热，§11.7）
@@ -176,6 +186,9 @@ class MainWindow(QMainWindow):
         # W19 N2：「我喜欢」真移动跨页联动——发起页 apply_rows 后，对侧专区页重查
         self._pages["liked"].zone_changed = self._on_zone_changed
         self._pages["candidate"].zone_changed = self._on_zone_changed
+        # RR1 T5：双击作品 → 打开阅读页（ZonePage 只发信号，主窗决定切页）。
+        for pid in ("liked", "candidate"):
+            self._pages[pid].reader_requested.connect(self._open_reader)
         body = QWidget()
         body_layout = QHBoxLayout(body)
         body_layout.addWidget(side, 0)
@@ -200,9 +213,56 @@ class MainWindow(QMainWindow):
     def page(self, page_id: str) -> PagePlaceholder:
         return self._pages[page_id]
 
+    @property
+    def reader_page(self):
+        """RR1：阅读页实例（测试/验收取用；不进 PAGE_ORDER/导航）。"""
+        return self._reader
+
+    # —— RR1 T5：双击 → 阅读页 → 返回原页 ——
+    def _open_reader(self, path, book_id) -> None:
+        """进入阅读页：记录来源页/标题 → 切 stack + 标题 + ui_usage bump("reader")。"""
+        from datetime import datetime, timezone
+
+        if self._reader is None:
+            return
+        if self._reader_return_widget is None:  # 嵌套重开保留最初的来源页
+            self._reader_return_widget = self._stack.currentWidget()
+            self._reader_return_title = self.windowTitle()
+        self._stack.setCurrentIndex(self._stack.indexOf(self._reader))
+        self.setWindowTitle(f"{Path(path).name} · 阅读")
+        if self._store is not None:
+            try:  # 性能统计走独立表（C12）；失败绝不挡住阅读
+                self._store.bump_ui_usage(
+                    "reader", now=datetime.now(timezone.utc).isoformat())
+            except Exception:
+                pass
+        self._reader.open_book(path, book_id)
+
+    def _close_reader(self) -> None:
+        """返回按钮：close_book 内 flush 进度，再切回来源页并恢复标题。"""
+        if self._reader is None:
+            return
+        self._reader.close_book()
+        target = self._reader_return_widget
+        index = self._stack.indexOf(target) if target is not None else -1
+        if index < 0 and self._nav.currentRow() >= 0:
+            index = self._stack.indexOf(self._pages[PAGE_ORDER[self._nav.currentRow()]])
+        self._stack.setCurrentIndex(max(0, index))
+        self.setWindowTitle(self._reader_return_title or "reco —— 本地小说推荐")
+        self._reader_return_widget = None
+        self._reader_return_title = ""
+
     def _on_nav(self, row: int) -> None:
         if row < 0 or row >= len(PAGE_ORDER):
             return
+        if self._reader_return_widget is not None:
+            # 阅读中点左侧导航：先落进度并退出阅读上下文（标题不残留）。
+            if self._reader is not None:
+                self._reader.flush_progress()
+            title = self._reader_return_title or "reco —— 本地小说推荐"
+            self._reader_return_title = ""
+            self._reader_return_widget = None
+            self.setWindowTitle(title)
         page = self._pages[PAGE_ORDER[row]]
         self._stack.setCurrentIndex(self._stack.indexOf(page))  # W18b：切右栏（缺此行=点导航不换页）
         # W12b 验收 1：导航/功能点击 → ui_usage 计数递增（独立表，C12 不进口味流）。
@@ -386,7 +446,14 @@ class MainWindow(QMainWindow):
         return job
 
     def closeEvent(self, event) -> None:  # noqa: N802（Qt 命名）
-        """退出前泄洪线程池，避免销毁后信号回访已删对象（Qt 生命周期）。"""
+        """退出前 flush 阅读进度 + 泄洪线程池，避免销毁后信号回访已删对象。"""
+        if self._reader is not None:
+            try:
+                self._reader.close_book()  # flush 进度 + 清空视图（同实例下次换书复用）
+            except Exception:
+                pass
+            if self._stack.currentWidget() is self._reader:
+                self._stack.setCurrentIndex(0)  # 离开阅读页再销毁（Qt 生命周期兜底）
         QThreadPool.globalInstance().waitForDone(3000)
         super().closeEvent(event)
 
