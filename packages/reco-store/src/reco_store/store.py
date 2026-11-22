@@ -104,6 +104,19 @@ _ALLOWED_KEYS = frozenset({
     # 标签
     "tag_id", "axis", "label", "parent", "status", "merged_into", "created_by",
     "source", "confidence", "basis_json", "alias", "aliases",
+    # #41（tag_merged 投影契约）：投影读 p["into"] 作为合并目标，into 必须与
+    # tag_id 成对合法——否则合法合并事件不可构造、合并态重放不恢复。
+    "into",
+    # #40（proposal_created 投影契约）：投影读 proposals 的 payload_json /
+    # evidence_json 两列，二者是标量 JSON 字符串（正文仍绝不入库——B2 内容纪律
+    # 由调用方遵守，白名单管的是键面与标量性，不管内容语义）。
+    # 为何选「扩白名单」而非「改投影派生」：事件流是唯一事实源（ADR-0003），
+    # 投影不该自造提案内容——派生方案要么丢业务负载（candidate/count/threshold
+    # 无处可去），要么在投影层重算提案语义（投影变成第二份真相，逐位重放必裂）。
+    # 若后续要收紧这个审计敏感面（事件里带 JSON 字符串列），另走 ADR 裁定。
+    "payload_json", "evidence_json",
+    # #42（proposal_updated 键面）：提案状态变更事件的载荷 = proposal_id + status。
+    "proposal_id",
     # 行为信号（不含 effective_weight——折叠时重算）
     "kind", "value", "session_id",
     # 静音持久化（工单 11：mutes 投影事件 payload）
@@ -366,6 +379,17 @@ CREATE TABLE IF NOT EXISTS ui_usage(
   uses INTEGER NOT NULL DEFAULT 0,
   last_used TEXT
 );
+
+CREATE TABLE IF NOT EXISTS reading_progress(
+  book_id INTEGER PRIMARY KEY REFERENCES books(book_id),
+  char_offset INTEGER,
+  epub_spine_index INTEGER,
+  epub_block_pos INTEGER,
+  percent REAL,
+  updated_at TEXT NOT NULL,
+  schema_version TEXT NOT NULL,
+  config_fingerprint TEXT NOT NULL
+);
 """
 
 COMPARE_TABLES: tuple[str, ...] = (
@@ -552,6 +576,12 @@ def _apply_event(conn: sqlite3.Connection, event: Event) -> None:
             "INSERT INTO proposals(kind, payload_json, evidence_json, status, created_at) VALUES(?,?,?,'pending',?)",
             (p["kind"], p.get("payload_json"), p.get("evidence_json"), at),
         )
+    elif t == "proposal_updated":
+        # #42：提案状态变更（pending→accepted/rejected）经事件流落库，重放逐位
+        # 恢复 status；不新增提案行。状态枚举守卫在写入方（reco-labels 适配器），
+        # 投影层照旧只做赋值——与其他 UPDATE 分支同形，保证重放确定性。
+        conn.execute("UPDATE proposals SET status = ? WHERE proposal_id = ?",
+                     (p["status"], int(p["proposal_id"])))
     elif t == "mute_upserted":
         conn.execute(
             "INSERT INTO mutes(book_id, dedup_key, axis, kind, expired_at, remaining_days,"
@@ -754,6 +784,71 @@ class Store:
         finally:
             conn.close()
         return {r[0]: {"uses": int(r[1]), "last_used": r[2]} for r in rows}
+
+    # ---- reading_progress（RR1/t1；§R4 阅读位置独立表，绝不进口味事件流）----
+
+    def upsert_reading_progress(
+        self,
+        book_id: int,
+        *,
+        ext: str,
+        char_offset: int | None = None,
+        epub_spine_index: int | None = None,
+        epub_block_pos: int | None = None,
+        percent: float,
+        updated_at: str,
+        config_fingerprint: str = "ui/reader/1",
+    ) -> None:
+        """保存阅读位置（book_id 主键单行 upsert）。
+
+        写走单写者队列（submit）；reading_progress 不进事件流、不投影、
+        不参与回放比对（照 ui_usage 先例）。ext 为格式声明，坐标列自证格式。
+        """
+        if not isinstance(ext, str) or not ext.strip():
+            raise ValueError("ext 必须为非空字符串")
+        if not isinstance(updated_at, str) or not updated_at.strip():
+            raise ValueError("updated_at 必须为非空 ISO8601 字符串")
+        if isinstance(percent, bool) or not isinstance(percent, (int, float)):
+            raise ValueError("percent 必须为数值")
+
+        def job(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT INTO reading_progress(book_id, char_offset, epub_spine_index,"
+                " epub_block_pos, percent, updated_at, schema_version, config_fingerprint)"
+                " VALUES(?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(book_id) DO UPDATE SET char_offset = excluded.char_offset,"
+                " epub_spine_index = excluded.epub_spine_index,"
+                " epub_block_pos = excluded.epub_block_pos, percent = excluded.percent,"
+                " updated_at = excluded.updated_at,"
+                " schema_version = excluded.schema_version,"
+                " config_fingerprint = excluded.config_fingerprint",
+                (int(book_id), char_offset, epub_spine_index, epub_block_pos,
+                 float(percent), updated_at, SCHEMA_VERSION, config_fingerprint),
+            )
+
+        self.submit(job).result()
+
+    def get_reading_progress(self, book_id: int) -> dict | None:
+        """读单书阅读位置：{char_offset, epub_spine_index, epub_block_pos, percent,
+        updated_at} 或 None（read_conn，WAL 读不阻塞写）。"""
+        conn = self.read_conn()
+        try:
+            row = conn.execute(
+                "SELECT char_offset, epub_spine_index, epub_block_pos, percent, updated_at"
+                " FROM reading_progress WHERE book_id = ?",
+                (int(book_id),),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return {
+            "char_offset": row[0],
+            "epub_spine_index": row[1],
+            "epub_block_pos": row[2],
+            "percent": row[3],
+            "updated_at": row[4],
+        }
 
     def verify_replay(self) -> ReplayReport:
         """ADR-0003：事件流重放进全新库，逐表逐位比对；任何漂移都报告。"""
