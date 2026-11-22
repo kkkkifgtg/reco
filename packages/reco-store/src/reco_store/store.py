@@ -103,6 +103,19 @@ _ALLOWED_KEYS = frozenset({
     # 标签
     "tag_id", "axis", "label", "parent", "status", "merged_into", "created_by",
     "source", "confidence", "basis_json", "alias", "aliases",
+    # #41（tag_merged 投影契约）：投影读 p["into"] 作为合并目标，into 必须与
+    # tag_id 成对合法——否则合法合并事件不可构造、合并态重放不恢复。
+    "into",
+    # #40（proposal_created 投影契约）：投影读 proposals 的 payload_json /
+    # evidence_json 两列，二者是标量 JSON 字符串（正文仍绝不入库——B2 内容纪律
+    # 由调用方遵守，白名单管的是键面与标量性，不管内容语义）。
+    # 为何选「扩白名单」而非「改投影派生」：事件流是唯一事实源（ADR-0003），
+    # 投影不该自造提案内容——派生方案要么丢业务负载（candidate/count/threshold
+    # 无处可去），要么在投影层重算提案语义（投影变成第二份真相，逐位重放必裂）。
+    # 若后续要收紧这个审计敏感面（事件里带 JSON 字符串列），另走 ADR 裁定。
+    "payload_json", "evidence_json",
+    # #42（proposal_updated 键面）：提案状态变更事件的载荷 = proposal_id + status。
+    "proposal_id",
     # 行为信号（不含 effective_weight——折叠时重算）
     "kind", "value", "session_id",
     # 静音持久化（工单 11：mutes 投影事件 payload）
@@ -562,6 +575,12 @@ def _apply_event(conn: sqlite3.Connection, event: Event) -> None:
             "INSERT INTO proposals(kind, payload_json, evidence_json, status, created_at) VALUES(?,?,?,'pending',?)",
             (p["kind"], p.get("payload_json"), p.get("evidence_json"), at),
         )
+    elif t == "proposal_updated":
+        # #42：提案状态变更（pending→accepted/rejected）经事件流落库，重放逐位
+        # 恢复 status；不新增提案行。状态枚举守卫在写入方（reco-labels 适配器），
+        # 投影层照旧只做赋值——与其他 UPDATE 分支同形，保证重放确定性。
+        conn.execute("UPDATE proposals SET status = ? WHERE proposal_id = ?",
+                     (p["status"], int(p["proposal_id"])))
     elif t == "mute_upserted":
         conn.execute(
             "INSERT INTO mutes(book_id, dedup_key, axis, kind, expired_at, remaining_days,"
