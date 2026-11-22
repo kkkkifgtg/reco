@@ -26,4 +26,9 @@ def test_main_unknown_command_exits_nonzero(capsys):
 
 
 def test_package_version_bumped():
-    assert reco_cli.__version__ == "0.2.0"
+    # 只校验语义化版本格式（X.Y.Z），不锁死具体版本号：
+    # 版本号随发布演进，硬编码断言会在每次改版本时无意义地失败。
+    import re
+    assert re.fullmatch(r"\d+\.\d+\.\d+", reco_cli.__version__), (
+        f"版本号须为语义化格式 X.Y.Z，实际: {reco_cli.__version__!r}"
+    )
