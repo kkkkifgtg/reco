@@ -158,8 +158,11 @@ def test_rank_table_model_reset_is_batched(qapp):
     assert model._reset_calls == 1  # 一次整批重置，非逐行 insert
 
 
-def test_recommend_page_buttons_wire_glue(qapp, store):
-    """推荐页三按钮真实接线：点击即经 glue 落事件（UI 线程只发起+渲染）。"""
+def test_recommend_page_pool_button_wire_glue(qapp, store):
+    """推荐页「加入候选池」真实接线：点击即经 glue 落事件（UI 线程只发起+渲染）。
+
+    #80：「不合口味」「标为喜欢」已移到阅读界面；列表层只剩「加入候选池」。
+    """
     from reco_ui.app import RecommendPage
     from reco_ui.glue import seed_books
 
@@ -167,19 +170,19 @@ def test_recommend_page_buttons_wire_glue(qapp, store):
     page = RecommendPage(store)
     page.set_rows(GOLD_ROWS, GOLD_NAMES)
     page.table.selectRow(0)  # 选中 book 2
-    page.btn_dislike.click()  # 写库在池线程：UI 线程零阻塞（§11.1）
+    page.btn_pool.click()  # 写库在池线程：UI 线程零阻塞（§11.1）
     from reco_ui.qt import QApplication, QThreadPool
 
     QThreadPool.globalInstance().waitForDone(3000)
     QApplication.processEvents()
-    assert page.btn_dislike.isEnabled()  # 完成后按钮恢复（连点防护解除）
+    assert page.btn_pool.isEnabled()  # 完成后按钮恢复（连点防护解除）
     assert page._status.text() == "已记录"
     conn = store.read_conn()
     try:
         kinds = [r[0] for r in conn.execute(
-            "SELECT payload_json FROM events WHERE event_type='rec_feedback'").fetchall()]
+            "SELECT event_type FROM events WHERE event_type='pool_added'").fetchall()]
         usage = conn.execute("SELECT COUNT(*) FROM ui_usage").fetchone()[0]
     finally:
         conn.close()
-    assert any(_json.loads(k).get("kind") == "dislike" for k in kinds)
+    assert kinds == ["pool_added"]
     assert usage == 0

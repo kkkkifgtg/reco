@@ -125,7 +125,11 @@ def test_inflight_dedup_and_failure_retry(qapp, store):
 
 
 def test_zone_menu_build_idempotent(qapp, store):
-    """坑 7：QMenu 构建幂等——重复构建不崩、每次新实例、动作数稳定。"""
+    """坑 7：QMenu 构建幂等——重复构建不崩、每次新实例、动作数稳定。
+
+    #80：候选池右键菜单已无「标为喜欢」「不合口味」，故候选池动作为空；
+    喜欢专区仍保留「移到候选池」。
+    """
     from reco_ui.pages import ZonePage
 
     page = ZonePage("candidate", store)
@@ -133,6 +137,13 @@ def test_zone_menu_build_idempotent(qapp, store):
     m1 = page.build_context_menu()
     m2 = page.build_context_menu()
     assert m1 is not m2
-    assert m1.actions() and len(m1.actions()) == len(m2.actions())
+    assert len(m1.actions()) == len(m2.actions())
+    assert [a.text() for a in m1.actions()] == []
     m1.deleteLater()
     m2.deleteLater()
+
+    liked = ZonePage("liked", store)
+    liked.load_now()
+    m3 = liked.build_context_menu()
+    assert [a.text() for a in m3.actions()] == ["移到候选池"]
+    m3.deleteLater()

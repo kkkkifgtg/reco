@@ -68,21 +68,14 @@ def _ready_page(store, qapp):
     return page
 
 
-def test_dislike_button_writes_rec_feedback(store, qapp):
-    """点「不合口味」→ 产生 rec_feedback 事件（不崩溃）。"""
-    from reco_ui.qt import QApplication, QThreadPool
+def test_recommend_page_has_no_dislike_button(store, qapp):
+    """#80：「不合口味」入口已移到阅读界面，推荐页不再有该按钮。"""
+    from reco_ui.app import RecommendPage
 
-    _seed(store)
-    page = _ready_page(store, qapp)
-    assert page.row_count() > 0, "前置条件：应有推荐行"
-    page.table.selectRow(0)
-
-    before = _count(store, "rec_feedback")
-    page.btn_dislike.click()
-    QThreadPool.globalInstance().waitForDone(15000)
-    QApplication.processEvents()
-
-    assert _count(store, "rec_feedback") > before, "点不合口味后应有 rec_feedback 事件"
+    page = RecommendPage(store, data_root="F:/data")
+    assert not hasattr(page, "btn_dislike")
+    assert not hasattr(page, "btn_like")
+    page.deleteLater()
 
 
 def test_pool_button_writes_pool_added(store, qapp):
@@ -102,7 +95,7 @@ def test_pool_button_writes_pool_added(store, qapp):
 
 
 def test_bad_book_id_reports_instead_of_crashing(store, qapp):
-    """书号无法解析时给状态提示，不抛异常。"""
+    """书号无法解析时给状态提示，不抛异常（#80 后列表层剩「加入候选池」入口）。"""
     from reco_core.score import RankRow, Reason
     from reco_ui.app import RecommendPage
 
@@ -113,5 +106,5 @@ def test_bad_book_id_reports_instead_of_crashing(store, qapp):
     page.apply_rank({"rank_rows": [bad], "names": {}})
     page.table.selectRow(0)
 
-    page.btn_dislike.click()  # 不应抛出
+    page.btn_pool.click()  # 不应抛出
     assert "无法解析" in page._status.text() or "失败" in page._status.text()

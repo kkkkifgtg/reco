@@ -2,7 +2,8 @@
 
 背景：§11.1 规定 UI 线程零 DB。issue #47 点名两处：
 - ZonePage._on_import_done（导入完成回调）曾调 zone_page_rows(self._store, ...)
-- ZonePage.move_selected_book_to_liked（发起移动）曾在 UI 线程 read_conn() 查源路径
+- 「标为喜欢」发起路径曾在 UI 线程 read_conn() 查源路径
+  （#80 之后该入口迁到阅读界面 ReaderPage，源查询在 ReaderLikeMoveWorker 内）
 本测试用「记录库读发生线程」的探针，钉死这两处不再在 UI 线程读库。
 
 范围说明：双击打开阅读页走用户即时手势（单行点查），不在 #47 范围，保持同步。
@@ -129,32 +130,23 @@ def test_import_done_does_not_read_db_on_ui_thread(qapp, store, tmp_path, db_pro
     )
 
 
-def test_move_done_does_not_read_db_on_ui_thread(qapp, store, tmp_path, db_probe):
-    """移动完成回调：重查行走 worker。"""
-    from reco_ui.pages import ZonePage
-
-    page = ZonePage("candidate", store, data_root=str(tmp_path / "data"))
-    page.load_now()
-    db_probe.clear()
-
-    page._on_move_done(True, [], "")
-    _wait()
-
-    assert _ui_thread_reads(db_probe) == [], (
-        "移动完成回调在 UI 线程查了库：" + str(_ui_thread_reads(db_probe))
-    )
-
-
-def test_move_selected_does_not_read_db_on_ui_thread(qapp, store, tmp_path, db_probe):
-    """发起「标为喜欢」：行与源路径查询都在 worker 线程。"""
-    from reco_ui.pages import ZonePage
+def test_reader_like_move_does_not_read_db_on_ui_thread(qapp, store, tmp_path, db_probe):
+    """#80：阅读页点「标为喜欢」→ 源查询与移动全在 worker 线程（UI 线程零 DB）。"""
+    from reco_ui.reader_page import ReaderPage
 
     _seed_candidate(store, tmp_path)
-    page = ZonePage("candidate", store, data_root=str(tmp_path / "data"))
-    page.load_now()
+    page = ReaderPage(store, data_root=str(tmp_path / "data"))
+    conn = store.read_conn()
+    try:
+        book_id = int(conn.execute(
+            "SELECT book_id FROM files WHERE present=1 LIMIT 1").fetchone()[0])
+    finally:
+        conn.close()
+    page.open_book(str(tmp_path / "data" / "candidate" / "novel-a.txt"), book_id,
+                   from_zone="candidate")
     db_probe.clear()
 
-    page.move_selected_book_to_liked(0)
+    page.like_button.click()
     _wait()
 
     assert _ui_thread_reads(db_probe) == [], (

@@ -177,7 +177,6 @@ class LoaderSignals(QObject):
 # 注册表在 run() 结束（finally）时释放，保证任何时点 worker 都有活引用。
 _ACTIVE_LOADERS: set = set()
 _ACTIVE_FEEDBACK: set = set()  # 反馈 worker 同款持活注册表（坑 2/生命周期）
-_ACTIVE_MOVES: set = set()     # W19：真移动 worker 持活注册表（同坑 2/生命周期）
 _ACTIVE_IMPORTS: set = set()  # W16 F1：导入 worker 持活注册表
 
 
@@ -313,70 +312,8 @@ class ScanWorker(QRunnable):
             pass  # 接收方已销毁
         finally:
             _ACTIVE_IMPORTS.discard(self)
-class LikeMoveSignals(QObject):
-    done = pyqtSignal(bool, list, str)  # (ok, rows, error)  # (成功?, error)；error 非空 = 失败
-
-
-class LikeMoveWorker(QRunnable):
-    """「标为喜欢」真移动 worker（池线程：文件移动+落库都不在 UI 线程，§11.1）。
-
-    成功路径：move_book_to_liked 一次完成「os.replace 真移动 + file_moved
-    落库（zone 变更）」。失败路径：不落任何事件，error 字符串回 UI。
-    """
-
-    def __init__(self, store, src_zone: str, data_root: str, *, src_path: str | None = None,
-                 row: int | None = None) -> None:
-        super().__init__()
-        self._store = store
-        self._src_zone = src_zone
-        self._data_root = str(data_root)
-        self._src_path = src_path
-        self._row = row
-        self.signals = LikeMoveSignals()
-        _ACTIVE_MOVES.add(self)
-
-    def run(self) -> None:
-        try:
-            src_path = self._src_path if self._src_path is not None else self._lookup_source()
-            if not src_path:
-                self._emit(False, [], "源文件不在本专区")
-                return
-            move_book_to_liked(self._store, src_path,
-                               self._data_root, from_zone=self._src_zone)
-        except Exception as exc:  # UI 只收字符串
-            self._emit(False, [], f"{type(exc).__name__}: {exc}")
-            return
-        self._emit(True, self._query_rows(), "")
-
-    def _lookup_source(self) -> str:
-        """按行号取本专区该书的现存路径（worker 线程，§11.1）。"""
-        rows = zone_page_rows(self._store, self._src_zone)
-        if self._row is None or not (0 <= int(self._row) < len(rows)):
-            return ""
-        book_id = int(rows[int(self._row)][0])
-        conn = self._store.read_conn()
-        try:
-            row = conn.execute(
-                "SELECT path FROM files WHERE book_id = ? AND zone = ? AND present = 1"
-                " ORDER BY file_id LIMIT 1", (book_id, self._src_zone)).fetchone()
-        finally:
-            conn.close()
-        return str(row[0]) if row is not None else ""
-
-    def _query_rows(self) -> list:
-        """移动后重查本专区行（worker 线程，§11.1 UI 线程零 DB）。"""
-        try:
-            return list(zone_page_rows(self._store, self._src_zone))
-        except Exception:
-            return []
-
-    def _emit(self, ok: bool, rows: list, error: str) -> None:
-        try:
-            self.signals.done.emit(ok, list(rows), error)
-        except RuntimeError:
-            pass  # 接收方已销毁
-        finally:
-            _ACTIVE_MOVES.discard(self)
+#80：「标为喜欢」的真移动 worker 已迁到阅读界面（reader_page.ReaderLikeMoveWorker），
+# 列表层不再有移动入口，故此处移除原 LikeMoveWorker。
 
 
 class FeedbackSignals(QObject):
@@ -618,6 +555,7 @@ def move_book_to_liked(
     data_root: str,
     *,
     from_zone: str = "candidate",
+    book_id: int | None = None,
 ) -> Path:
     """「我喜欢」真移动唯一写入口（工单 19 N2）。
 
@@ -630,9 +568,23 @@ def move_book_to_liked(
     from reco_ui.glue import zone_rows
 
     src = Path(src_path)
-    rows = zone_rows(store, from_zone)
-    book_id = next((int(r[0]) for r in rows
-                    if Path(str(r[1])).name == src.name), None)
+    if book_id is None:
+        # 未显式给书号时才按名字回查（zone_rows 默认只取前 200 行，调用方若已知
+        # book_id 应直接传入，避免大库里回查截断导致 no-op）
+        rows = zone_rows(store, from_zone)
+        book_id = next((int(r[0]) for r in rows
+                        if Path(str(r[1])).name == src.name), None)
+    else:
+        # 显式给书号时仍要核实源文件确实在 from_zone 内（不猜、不越区移动）
+        conn = store.read_conn()
+        try:
+            row = conn.execute(
+                "SELECT book_id FROM files WHERE path = ? AND zone = ? AND present = 1"
+                " LIMIT 1", (str(src), from_zone)).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return src  # 源不在 from_zone（已移走/重复点击）：no-op 防护
     if book_id is None:
         return src  # 源不在 from_zone（已移走/重复点击）：no-op 防护
     dst_dir = _makedirs_zone(data_root, "liked")
@@ -721,7 +673,6 @@ class ZonePage(QWidget):
         layout.addWidget(self._table, 1)
         self._status = QLabel("待加载")
         self._status.setObjectName("dim")
-        self.zone_changed = None  # W19 N2：跨页联动钩子（MainWindow 注入；页不认识兄弟页）
         layout.addWidget(self._status)
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
@@ -824,31 +775,7 @@ class ZonePage(QWidget):
         worker.signals.done.connect(self._on_import_done)
         QThreadPool.globalInstance().start(worker)
 
-    # —— 工单 19 N2：右键「标为喜欢」真移动 ——
-    def move_selected_book_to_liked(self, row: int) -> bool:
-        """发起真移动：行与源路径查询在池线程（§11.1），移动+落库同在 worker。
-
-        返回 False = 无选中/空表（零副作用）；True = 已发起（结果经完成信号回传）。
-        """
-        if self._store is None:
-            return False
-        if not (0 <= row < self._model.rowCount()):
-            return False
-        self._status.setText("移动中…")
-        worker = LikeMoveWorker(self._store, self.zone, self._data_root, row=row)
-        worker.signals.done.connect(self._on_move_done)
-        QThreadPool.globalInstance().start(worker)
-        return True
-
-    def _on_move_done(self, ok: bool, rows: list, error: str) -> None:
-        """移动完成 → 渲染 worker 回传的行（行重查在 worker 线程，§11.1）。"""
-        if not ok:
-            self._status.setText(f"移动失败（可重试）：{error}")
-            return
-        self.apply_rows(rows)
-        if self.zone_changed is not None:
-            self.zone_changed(self)  # 对侧专区页同步重查（两表格联动，MainWindow 注入）
-        self._status.setText("已移到喜欢专区")
+    #80：「标为喜欢」真移动入口已移到阅读界面（ReaderPage）；列表层不再提供。
 
     def _on_import_done(self, imported: int, skipped: int, rejected: int, rows: list,
                         error: str) -> None:
@@ -939,15 +866,13 @@ class ZonePage(QWidget):
         return self._model.rowCount()
 
     def build_context_menu(self) -> QMenu:
-        """每次新构建（不缓存实例 → 无悬挂 QMenu，坑 7 幂等）。"""
+        """每次新构建（不缓存实例 → 无悬挂 QMenu，坑 7 幂等）。
+
+        #80：「标为喜欢」「不合口味」已移到阅读界面，列表层不再提供这两个入口；
+        候选池专区因此没有可用动作（空菜单），喜欢专区保留「移到候选池」。
+        """
         menu = QMenu(self)
-        if self.zone == "candidate":
-            like_action = menu.addAction("标为喜欢")
-            like_action.triggered.connect(
-                lambda: self.move_selected_book_to_liked(
-                    self._table.currentIndex().row()))
-            menu.addAction("不合口味")
-        else:
+        if self.zone != "candidate":
             menu.addAction("移到候选池")
         return menu
 
