@@ -214,6 +214,125 @@ def test_like_click_without_source_degrades_honestly(store, tmp_path):
     page.close_book()
 
 
+# ---------------------------------------------------------- t3 findings：F1/F2/F3
+
+
+def _seed_vector(store, book_id, dim=2):
+    """给书落向量，让 rank_candidates 能把它排进推荐列表。"""
+    import struct
+
+    blob = struct.pack(">2i", 1, dim) + struct.pack(">2d", 0.6, 0.8)
+    store.append_event(
+        "vector_computed",
+        payload={"vector_blob_hex": blob.hex(), "dim": dim,
+                 "idf_version": "t/1", "norm": 1.0},
+        book_id=book_id, occurred_at=NOW, config_fingerprint="t/1",
+    )
+
+
+def test_like_move_refreshes_recommend_page(qapp, store, tmp_path):
+    """F1：阅读页真移动后推荐页必须立即重算——该行从推荐列表消失。
+
+    不依赖切导航或手动刷新（zone_moved 信号 → 主窗重算 recommend）。
+    """
+    from reco_ui.app import MainWindow
+    from reco_store.recommend import rank_candidates
+
+    f, bid = _seed_zone_file(store, tmp_path, "candidate", "rec-moved.txt")
+    _seed_vector(store, bid)
+    win = MainWindow(store=store, config={"data_root": str(tmp_path / "data")})
+    rec = win.page("recommend")
+    rec.apply_rank(rank_candidates(store))
+    assert rec.row_count() > 0, "前置条件：推荐页应有该书的行"
+
+    reader = win.reader_page
+    _open_and_wait(reader, f, bid, from_zone="recommend")
+    reader.like_button.click()
+    assert _pump(reader, lambda: reader.status_text == "已移到喜欢专区"), reader.status_text
+
+    assert _pump(reader, lambda: rec.row_count() == 0), (
+        "推荐页真移动后必须重算并移除该行，实况行数: "
+        f"{rec.row_count()}"
+    )
+    win.close()
+
+
+def test_like_move_refreshes_recommend_page_despite_inflight_dedup(qapp, store, tmp_path):
+    """F1 边界：推荐页 rank 装配在途时的移动也必须补发重算（in-flight 去重不吞请求）。"""
+    from reco_ui.app import MainWindow
+    from reco_store.recommend import rank_candidates
+
+    f, bid = _seed_zone_file(store, tmp_path, "candidate", "rec-inflight.txt")
+    _seed_vector(store, bid)
+    win = MainWindow(store=store, config={"data_root": str(tmp_path / "data")})
+    rec = win.page("recommend")
+    rec.apply_rank(rank_candidates(store))
+    assert rec.row_count() > 0
+
+    reader = win.reader_page
+    _open_and_wait(reader, f, bid, from_zone="recommend")
+    reader.like_button.click()
+    assert _pump(reader, lambda: reader.status_text == "已移到喜欢专区"), reader.status_text
+
+    assert _pump(reader, lambda: rec.row_count() == 0), (
+        "在途去重不得吞掉重算请求，实况行数: "
+        f"{rec.row_count()}"
+    )
+    win.close()
+
+
+def test_like_idempotent_noop_does_not_claim_moved(qapp, store, tmp_path):
+    """F2：重复点「标为喜欢」（幂等 no-op）文案不得谎称「已移到喜欢专区」。"""
+    f, bid = _seed_zone_file(store, tmp_path, "liked", "already.txt", "已在喜欢专区。")
+    page = _reader(store, tmp_path)
+    _open_and_wait(page, f, bid, from_zone="candidate")
+    page.like_button.click()
+    assert _pump(page, lambda: page.status_text != ""), page.status_text
+
+    assert "已移到喜欢专区" not in page.status_text, (
+        f"幂等 no-op 不得谎称已移动，实况: {page.status_text}"
+    )
+    assert "已在喜欢专区" in page.status_text, page.status_text
+    assert f.exists(), "幂等 no-op 不移动文件"
+    conn = store.read_conn()
+    try:
+        evs = [r[0] for r in conn.execute(
+            "SELECT event_type FROM events ORDER BY event_id").fetchall()]
+    finally:
+        conn.close()
+    assert "file_moved" not in evs, f"幂等 no-op 不落移动事件，实况: {evs}"
+    page.close_book()
+
+
+def test_like_without_data_root_degrades_honestly(qapp, store, tmp_path, monkeypatch):
+    """F3：data_root 未注入 → 诚实降级：不移动、不在进程 CWD 凭空建 liked/。"""
+    from reco_ui.reader_page import ReaderPage
+
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+
+    f, bid = _seed_zone_file(store, tmp_path, "candidate", "no-root.txt")
+    page = ReaderPage(store)  # 未注入 data_root
+    _open_and_wait(page, f, bid, from_zone="candidate")
+    page.like_button.click()
+    assert _pump(page, lambda: page.status_text != ""), page.status_text
+
+    assert "无法移动" in page.status_text or "未配置数据目录" in page.status_text, (
+        f"必须诚实说明降级原因，实况: {page.status_text}"
+    )
+    assert not (cwd / "liked").exists(), "CWD 不得凭空出现 liked/ 目录"
+    assert f.exists(), "不得移动源文件"
+    conn = store.read_conn()
+    try:
+        evs = [r[0] for r in conn.execute(
+            "SELECT event_type FROM events ORDER BY event_id").fetchall()]
+    finally:
+        conn.close()
+    assert "file_moved" not in evs, f"降级不落移动事件，实况: {evs}"
+    page.close_book()
+
+
 # ---------------------------------------------------------- 列表层入口已移除
 
 

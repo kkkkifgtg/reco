@@ -245,9 +245,11 @@ def test_reader_like_on_already_moved_book_is_idempotent_noop(qapp, store, tmp_p
     page = _reader(store, tmp_path)
     _open_and_wait(page, f, book_id)
     page.like_button.click()
-    assert _pump(page, lambda: page.status_text in ("已移到喜欢专区",) or
-                 "失败" in page.status_text), page.status_text
+    assert _pump(page, lambda: page.status_text != ""), page.status_text
 
+    # F2：幂等 no-op 的文案不得谎称「已移到喜欢专区」
+    assert "已移到喜欢专区" not in page.status_text, page.status_text
+    assert "已在喜欢专区" in page.status_text, page.status_text
     assert f.is_file(), "文件保持在 liked/ 原位"
     evs = [e[0] for e in _read_events(store)]
     assert "file_moved" not in evs, f"不重复落移动事件，实况: {evs}"

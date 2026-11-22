@@ -121,6 +121,8 @@ class MainWindow(QMainWindow):
         self._data_root = self._config.get("data_root", DEFAULT_DATA_ROOT)  # W16 配置注入
         self._pages: dict[str, PagePlaceholder] = {}
         self._inflight: set[str] = set()  # 坑 2：in-flight 去重
+        # F1：同页在途时排一次重载（in-flight 去重会吞掉重算请求 → 行过期残留）
+        self._pending_reload: set[str] = set()
         self._preloader = None  # W12b：骨架构建完成后在 _build_skeleton 末尾启动
         self._loaders: dict[str, ZoneLoader] = {}  # 持有运行中 loader 的 Python 引用（QThreadPool 不持包装）
         # RR1 T5：阅读页常驻实例（换书复用；不进 PAGE_ORDER/导航）+ 来源页记录。
@@ -315,7 +317,10 @@ class MainWindow(QMainWindow):
         if self._store is None:
             return
         if page_id in self._inflight:
-            return  # 坑 2：同页并发请求只发一次
+            # 坑 2：同页并发请求只发一次；但本次重载请求不能丢——记一笔，
+            # 等在途 loader 收尾后补发（F1：真移动后推荐页必须重算）。
+            self._pending_reload.add(page_id)
+            return
         if isinstance(page, ZonePage):
             self._inflight.add(page_id)
             page.mark_loading()  # W18 U2：点击立即有可见反馈（「加载中…」+隐藏重试按钮）
@@ -349,9 +354,17 @@ class MainWindow(QMainWindow):
             return
         if error:
             page.mark_failed(error)
+        else:
+            page.apply_rank(out)
+            page.mark_loaded()
+        self._flush_pending_reload(page_id)
+
+    def _flush_pending_reload(self, page_id: str) -> None:
+        """在途 loader 收尾后补发被去重吞掉的重载请求（F1）。"""
+        if page_id not in self._pending_reload:
             return
-        page.apply_rank(out)
-        page.mark_loaded()
+        self._pending_reload.discard(page_id)
+        self._start_load(page_id)
 
     def _on_profile_loaded(self, page_id: str, data, error: str) -> None:
         self._inflight.discard(page_id)
@@ -371,8 +384,13 @@ class MainWindow(QMainWindow):
         self._nav.setCurrentRow(2)
 
     def _on_reader_zone_moved(self) -> None:
-        """#80：阅读页真移动完成 → liked/candidate 两页重查（worker 内查库，§11.1）。"""
-        for pid in ("liked", "candidate"):
+        """#80：阅读页真移动完成 → liked/candidate 两页 + 推荐页重算（worker 内查库，§11.1）。
+
+        F1：推荐页也必须重算——移走的书不该继续留在推荐列表里（master 时代靠
+        RecommendPage._on_like_move_done → rank_candidates 重放抹掉，入口迁到
+        阅读界面后这条链路丢了，这里补齐）。
+        """
+        for pid in ("liked", "candidate", "recommend"):
             self._start_load(pid)
 
     def _on_zone_loaded(self, page_id: str, rows) -> None:
@@ -382,6 +400,7 @@ class MainWindow(QMainWindow):
         page = self._pages.get(page_id)
         if isinstance(page, ZonePage):
             page.apply_rows(rows)
+        self._flush_pending_reload(page_id)
 
     def _on_zone_failed(self, page_id: str, message: str) -> None:
         """worker 失败 → 清 in-flight、不置位、提示可重试（坑 3）。"""
@@ -390,6 +409,7 @@ class MainWindow(QMainWindow):
         page = self._pages.get(page_id)
         if isinstance(page, ZonePage):
             page.mark_failed(message)
+        self._flush_pending_reload(page_id)
 
     # —— N1：目录→库再扫描（手动「刷新」与定时自动扫描共用路径）——
     def _on_auto_scan(self) -> None:

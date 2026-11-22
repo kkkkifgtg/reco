@@ -121,9 +121,13 @@ class ReaderLoadWorker(QRunnable):
 
 
 class ReaderLikeMoveSignals(QObject):
-    """阅读页「标为喜欢」完成信号：(ok, error)；error 非空 = 失败。"""
+    """阅读页「标为喜欢」完成信号：(ok, moved, error)。
 
-    done = pyqtSignal(bool, str)
+    ok=False → 失败（error 非空）；ok=True 且 moved=True → 真移动落位；
+    ok=True 且 moved=False → 幂等 no-op（书已在喜欢专区，无位移无事件）。
+    """
+
+    done = pyqtSignal(bool, bool, str)
 
 
 class ReaderLikeMoveWorker(QRunnable):
@@ -144,20 +148,30 @@ class ReaderLikeMoveWorker(QRunnable):
         _ACTIVE_READER_MOVES.add(self)
 
     def run(self) -> None:
+        from pathlib import Path
+
         from reco_ui.pages import move_book_to_liked
 
+        # F3：data_root 未注入时绝不移动——move_book_to_liked 会以 CWD 为根
+        # 凭空建 liked/ 目录（用户可见的副作用），此处提前诚实降级。
+        if not self._data_root:
+            self._emit(False, False, "未配置数据目录，无法移动到喜欢专区")
+            return
         try:
             row = self._lookup_source()
             if row is None:
-                self._emit(False, "本机已找不到这本书的文件")
+                self._emit(False, False, "本机已找不到这本书的文件")
                 return
             src_path, zone = row
-            move_book_to_liked(self._store, src_path, self._data_root,
-                               from_zone=zone, book_id=self._book_id)
+            dst = move_book_to_liked(self._store, src_path, self._data_root,
+                                     from_zone=zone, book_id=self._book_id)
         except Exception as exc:  # UI 只收字符串
-            self._emit(False, f"{type(exc).__name__}: {exc}")
+            self._emit(False, False, f"{type(exc).__name__}: {exc}")
             return
-        self._emit(True, "")
+        # F2：move_book_to_liked 返回原路径 = 幂等 no-op（已在喜欢专区/源已移走），
+        # 此时不能谎称「已移到喜欢专区」。
+        moved = Path(str(dst)) != Path(src_path)
+        self._emit(True, moved, "")
 
     def _lookup_source(self):
         """(path, zone) 候选源；优先 candidate 行，其次任意现存专区行。"""
@@ -174,9 +188,9 @@ class ReaderLikeMoveWorker(QRunnable):
             conn.close()
         return (str(row[0]), str(row[1])) if row is not None else None
 
-    def _emit(self, ok: bool, error: str) -> None:
+    def _emit(self, ok: bool, moved: bool, error: str) -> None:
         try:
-            self.signals.done.emit(ok, error)
+            self.signals.done.emit(ok, moved, error)
         except RuntimeError:
             pass  # 接收方已销毁
         finally:
@@ -567,16 +581,24 @@ class ReaderPage(QWidget):
         """「标为喜欢」：真移动进 liked/（池线程；UI 线程零 DB 零阻塞，§11.1）。"""
         if self._store is None or self._book_id is None or self._feedback_inflight:
             return
+        # F3：data_root 未注入 → 诚实降级（不移动、不在 CWD 建目录）
+        if not self._data_root:
+            self._status.setText("未配置数据目录，无法移动到喜欢专区")
+            return
         self._set_feedback_buttons_enabled(False)
         worker = ReaderLikeMoveWorker(self._store, self._book_id,
-                                      str(self._data_root or ""))
+                                      str(self._data_root))
         worker.signals.done.connect(self._on_like_move_done)
         QThreadPool.globalInstance().start(worker)
 
-    def _on_like_move_done(self, ok: bool, error: str) -> None:
+    def _on_like_move_done(self, ok: bool, moved: bool, error: str) -> None:
         self._set_feedback_buttons_enabled(True)
         if not ok:
             self._status.setText(f"移动失败（可重试）：{error}")
+            return
+        if not moved:
+            # F2：幂等 no-op（书已在喜欢专区）——不谎称已移动
+            self._status.setText("这本已在喜欢专区，无需重复移动")
             return
         self._status.setText("已移到喜欢专区")
         try:
