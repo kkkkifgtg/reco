@@ -16,7 +16,7 @@ from PyQt6.QtCore import (
     QUrl,
     pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPalette, QPixmap
+from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPalette, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -29,13 +29,16 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMenu,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QScrollBar,
     QSizePolicy,
     QSpinBox,
     QStackedWidget,
     QTableView,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -58,6 +61,7 @@ __all__ = [
     "QMainWindow",
     "QMenu",
     "QObject",
+    "QPlainTextEdit",
     "QPainter",
     "QPalette",
     "QPixmap",
@@ -65,10 +69,13 @@ __all__ = [
     "QPushButton",
     "QRunnable",
     "QScrollArea",
+    "QScrollBar",
     "QSizePolicy",
     "QSpinBox",
     "QStackedWidget",
     "QTableView",
+    "QTextBrowser",
+    "QTextCursor",
     "QThreadPool",
     "QTimer",
     "Qt",
