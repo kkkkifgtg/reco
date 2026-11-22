@@ -1,0 +1,52 @@
+
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+
+# GitHub 官方 code-scanning/checkmarx-one 模板的改进版
+# 触发场景：在 master 分支的 Pull Request（打开 / 重开 / 推送更新）时运行
+
+name: Checkmarx Scan
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches: [ "master" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    permissions:
+      contents: read          # actions/checkout 拉取代码
+      security-events: write  # github/codeql-action/upload-sarif 上传 SARIF 结果
+      actions: read           # 私有仓库下 upload-sarif 所需
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkmarx One scan
+        # 改动1：主版本 tag @2，替代裸 commit SHA，便于维护与获取上游修复
+        uses: checkmarx/ast-github-action@2
+        with:
+          # 改动2：base_uri 改为读取 Secret，避免把租户环境域名写死在仓库里
+          base_uri: ${{ secrets.CX_BASE_URI }}
+          cx_client_id: ${{ secrets.CX_CLIENT_ID }}
+          cx_client_secret: ${{ secrets.CX_CLIENT_SECRET }}
+          cx_tenant: ${{ secrets.CX_TENANT }}
+          # 改动3：用仓库名显式指定项目，防止 Checkmarx One 端重复建项目
+          project_name: ${{ github.event.repository.name }}
+          additional_params: --report-format sarif --output-path .
+
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          # 改动4：category 区分不同扫描器，便于在 Security 面板分组展示
+          #        文件名须与上一步 --output-path 生成的 cx_result.sarif 一致
+          sarif_file: cx_result.sarif
+          category: checkmarx
