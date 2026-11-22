@@ -55,7 +55,8 @@ def seed_books(store: Store, *, books: int, liked: int, candidate: int, now=None
 _ZONE_DISPLAY = {"liked": "喜欢专区", "candidate": "候选池", "推荐专区": "推荐专区"}
 
 
-def zone_rows(store: Store, zone: str, *, limit: int = 200) -> list[tuple]:
+def zone_rows(store: Store, zone: str, *, limit: int = 200,
+              offset: int = 0) -> list[tuple]:
     """专区行读取（独立只读连接；无正文，B 类审计点）。
 
     行 = (book_id, 名称, 大小, 备注)。
@@ -70,8 +71,8 @@ def zone_rows(store: Store, zone: str, *, limit: int = 200) -> list[tuple]:
             "SELECT b.book_id, b.display_name, b.size_bytes"
             " FROM files f JOIN books b ON b.book_id = f.book_id"
             " WHERE f.zone = ? AND f.present = 1"
-            " ORDER BY b.book_id LIMIT ?",
-            (zone, int(limit)),
+            " ORDER BY b.book_id LIMIT ? OFFSET ?",
+            (zone, int(limit), int(max(0, offset))),
         ).fetchall()
         # 该页所有 book_id 在其他专区的分布
         ids = [int(r[0]) for r in raw]
@@ -141,3 +142,20 @@ def record_feedback(store: Store, kind: str, book_id, axis=None, value=1.0, now=
                 config_fingerprint=GUI_FEEDBACK_FP,
             )
     return event_id
+
+def zone_meta(store: Store, zone: str, *, limit: int = 200) -> dict:
+    """专区元信息：总数与是否被截断（#75 静默截断修复）。
+
+    修复前用户看到 200 行却不知库里还有 1329 本；这里给出 {total, shown, truncated}，
+    界面据此显示「显示 200 / 共 1529」。
+    """
+    conn = store.read_conn()
+    try:
+        total = int(conn.execute(
+            "SELECT COUNT(*) FROM files WHERE zone = ? AND present = 1", (zone,)
+        ).fetchone()[0])
+    finally:
+        conn.close()
+    shown = min(total, int(limit))
+    return {"zone": str(zone), "total": total, "shown": shown,
+            "truncated": total > shown, "limit": int(limit)}

@@ -60,7 +60,15 @@ def recommend_empty_text(out) -> str | None:
     return RECOMMEND_EMPTY_NO_CANDIDATES
 
 
-def zone_page_rows(store, zone: str, *, limit: int = 200, lib_ms: float = 800.0) -> list[tuple]:
+def zone_meta(store, zone: str, *, limit: int = 200) -> dict:
+    """专区总数与截断状态（#75：转发 glue.zone_meta，供 UI 显示「已显示 N / 共 M」）。"""
+    from reco_ui.glue import zone_meta as _zm
+
+    return _zm(store, zone, limit=limit)
+
+
+def zone_page_rows(store, zone: str, *, limit: int = 200, offset: int = 0,
+                   lib_ms: float = 800.0) -> list[tuple]:
     """专区行查询：行 = (book_id, 名称, 大小, 备注)。
 
     分级超时（坑 1）：查询墙钟超 lib_ms 上限 → TimeoutError（worker 线程内，
@@ -69,7 +77,7 @@ def zone_page_rows(store, zone: str, *, limit: int = 200, lib_ms: float = 800.0)
     from reco_ui.glue import zone_rows
 
     t0 = time.perf_counter()
-    raw = zone_rows(store, zone, limit=limit)
+    raw = zone_rows(store, zone, limit=limit, offset=offset)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     if elapsed_ms > lib_ms:
         raise TimeoutError(f"zone={zone!r} 查询 {elapsed_ms:.0f}ms 超出分级超时上限 {lib_ms:.0f}ms")
@@ -857,11 +865,22 @@ class ZonePage(QWidget):
         self._status.setText("已加载")
         self.btn_retry.hide()
 
-    def apply_rows(self, rows) -> None:
-        """worker 回调装填（UI 线程：只渲染）。"""
+    def apply_rows(self, rows, *, total: int | None = None) -> None:
+        """worker 回调装填（UI 线程：只渲染）。
+
+        #75：total 是库内真实总数。修复前只显示 200 行却不说还有多少，
+        用户以为书库就这么大（candidate 实际 1529 本，87% 被静默隐藏）。
+        """
         self._model.set_rows(rows)
         self.loaded = True
-        self._status.setText("已加载")
+        shown = len(rows)
+        if total is not None and total > shown:
+            self._status.setText(
+                f"已显示 {shown} / 共 {total} 本（其余未加载，可用搜索缩小范围）")
+        elif total is not None:
+            self._status.setText(f"已加载 {shown} 本")
+        else:
+            self._status.setText("已加载")
         self.btn_retry.hide()
 
     def mark_failed(self, message: str) -> None:

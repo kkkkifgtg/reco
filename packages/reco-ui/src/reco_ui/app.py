@@ -37,6 +37,7 @@ from reco_ui.pages import (
     ZoneLoader,
     ZonePage,
     recommend_empty_text,
+    zone_meta,
     zone_page_rows,
 )
 from reco_ui.preload import Preloader
@@ -367,6 +368,7 @@ class MainWindow(QMainWindow):
                 continue
             try:
                 rows = zone_page_rows(self._store, pid)
+                _meta = zone_meta(self._store, pid)
             except Exception:
                 continue  # 对侧刷新失败不掩盖发起页的成功状态
             page.apply_rows(rows)
@@ -423,7 +425,8 @@ class MainWindow(QMainWindow):
             from reco_ui.pages import zone_page_rows
 
             try:
-                page.apply_rows(zone_page_rows(self._store, zone))
+                page.apply_rows(zone_page_rows(self._store, zone),
+                                total=zone_meta(self._store, zone)["total"])
             except Exception as exc:
                 page.mark_failed(f"{type(exc).__name__}: {exc}")
                 return
@@ -453,15 +456,17 @@ class MainWindow(QMainWindow):
 
     def _make_zone_job(self, page_id: str):
         def job() -> bool:
-            from reco_ui.pages import zone_page_rows
+            from reco_ui.pages import zone_meta, zone_page_rows
 
             try:
                 rows = zone_page_rows(self._store, page_id, lib_ms=_LOAD_LIB_MS)
+                total = zone_meta(self._store, page_id)["total"]
             except Exception:
                 return False
             page = self._pages.get(page_id)
             if isinstance(page, ZonePage):
-                page.apply_rows(rows)
+                # #75：必须传 total，否则界面无法告知「还有多少本未加载」
+                page.apply_rows(rows, total=total)
             return True
         return job
 
