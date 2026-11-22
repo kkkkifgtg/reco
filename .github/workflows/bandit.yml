@@ -1,0 +1,20 @@
+# Bandit（PyCQA）安全审计：Python 源码 SAST，结果上传 Code Scanning。
+# 本地对应门禁：scripts/audit.py（见 .dsh/skills/pre-commit-audit/SKILL.md）
+name: Bandit 安全审计
+on:
+  push:
+    branches: [master]
+  pull_request:
+jobs:
+  bandit:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyCQA/bandit-action@v1
+        with:
+          python-version: "3.12"
+          severity: "medium"

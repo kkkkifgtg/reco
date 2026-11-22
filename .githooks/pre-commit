@@ -1,0 +1,8 @@
+#!/bin/sh
+# 提交前审计门禁：见 .dsh/skills/pre-commit-audit/SKILL.md
+# 启用：git config core.hooksPath .githooks
+set -e
+ROOT="$(git rev-parse --show-toplevel)"
+PY="$ROOT/.venv/Scripts/python.exe"
+[ -x "$PY" ] || PY="python"
+"$PY" "$ROOT/scripts/audit.py" --staged
