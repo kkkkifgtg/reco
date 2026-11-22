@@ -48,7 +48,7 @@ for i, (sha, msg, parent) in enumerate(merges, start=1):
     api_soft("-X", "POST", "repos/kkkkifgtg/reco/git/refs", "-f", "ref=refs/heads/%s" % base_b, "-f", "sha=" + parent)
     body = "Retroactive PR：历史工单补录（合并提交 %s）。" % sha[:7] + NL + NL + "当时已完成双闸门评审（test-runner + auditor），结论在 audit-log。本页为补建留痕。"
     out, code, err = pr("create", "--base", base_b, "--head", head_b, "--title", msg, "--body", body)
-    if "github.com" in out:
+    if code == 0:
         ok += 1
         print("OK", num, msg[:40])
     else:

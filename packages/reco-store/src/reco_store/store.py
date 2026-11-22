@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import tempfile
@@ -803,5 +804,17 @@ def rebuild_projections(target: str | Path, events: Sequence[Event]) -> None:
 
 
 def open_store(path: str | Path) -> Store:
-    """打开（或创建）特征库；库级设置与 schema 初始化一次完成。"""
-    return Store(path)
+    """打开（或创建）特征库；库级设置与 schema 初始化一次完成。
+
+    新建库时收紧权限（POSIX 0600，CWE-732）：库内包含书名/路径/反馈等私人
+    数据；Windows 无 POSIX 权限位，跳过。既有库不改权限。
+    """
+    p = Path(path)
+    existed = p.exists()
+    store = Store(p)
+    if not existed and os.name == "posix":
+        try:
+            os.chmod(p, 0o600)
+        except OSError:
+            pass
+    return store

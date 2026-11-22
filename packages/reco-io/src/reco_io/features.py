@@ -17,7 +17,6 @@ import codecs
 import html
 import math
 import os
-import re
 import time
 import unicodedata
 import zipfile
@@ -40,8 +39,13 @@ DEFAULT_CHUNK_BYTES = 1_000_000
 DEFAULT_BUDGET_SECONDS = 30.0
 
 _EPUB_TEXT_EXTS = (".xhtml", ".html", ".htm")
-_BLOCK_RE = re.compile(r"<\s*(style|script)\b[^>]*>.*?<\s*/\s*\1\s*>", re.IGNORECASE | re.DOTALL)
-_TAG_RE = re.compile(r"<[^>]+>")
+
+# 解压安全上限（CWE-409）：成员声明尺寸/压缩比/累计解压量任一超限即降级，
+# 不再整段解压进内存；读取时仍以 cap+1 实读校验声明值是否可信。
+_MAX_DECOMPRESSED_MEMBER_BYTES = 64 * 1024 * 1024
+_MAX_DECOMPRESSED_TOTAL_BYTES = 256 * 1024 * 1024
+_MAX_COMPRESSION_RATIO = 200  # 正常中文文本压缩比远低于此；超比且样本够大视为可疑
+_MIN_RATIO_SAMPLE_BYTES = 1_000_000
 
 # v1 不支持嵌套引号；" 与 ＂ 以自身开闭；未闭合引号的内文不计数（S3b）。
 _OPENER_TO_CLOSER = {"“": "”", "\"": "\"", "＂": "＂", "「": "」", "『": "』"}
@@ -403,25 +407,120 @@ def _feed_file(acc: _Accumulator, path, *, chunk_bytes: int, streamed: bool, sta
 
 
 def _html_to_text(text: str) -> str:
-    text = _BLOCK_RE.sub(" ", text)
-    text = _TAG_RE.sub(" ", text)
+    """HTML → 纯文本（线性扫描；不用回溯正则，避免病态输入平方级耗时，CWE-1333）。"""
+    text = _strip_blocks_linear(text)
+    text = _strip_tags_linear(text)
     return html.unescape(text)
+
+
+def _strip_tags_linear(text: str) -> str:
+    """等价 `<[^>]+>` → " " 的线性实现；未闭合 '<' 剩余原样保留（正则亦不匹配）。"""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        lt = text.find("<", i)
+        if lt < 0:
+            out.append(text[i:])
+            break
+        gt = text.find(">", lt + 1)
+        if gt < 0:
+            out.append(text[i:])
+            break
+        if gt == lt + 1:  # "<>"：正则不匹配，原样保留
+            out.append(text[i:gt + 1])
+            i = gt + 1
+            continue
+        out.append(text[i:lt])
+        out.append(" ")
+        i = gt + 1
+    return "".join(out)
+
+
+def _strip_blocks_linear(text: str) -> str:
+    """线性剥除 <script|style ...>...</script|style> 块（等价 `_BLOCK_RE` 语义）。"""
+    lowered = text.lower()
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        found = _find_block_open(lowered, i)
+        if found is None:
+            out.append(text[i:])
+            break
+        pos, tag = found
+        out.append(text[i:pos])
+        close = _find_block_close(lowered, pos, tag)
+        if close is None:
+            out.append(text[pos:])  # 未闭合块不剥（与正则无匹配一致）
+            break
+        out.append(" ")
+        i = close
+    return "".join(out)
+
+
+def _tag_boundary_ok(text: str, idx: int) -> bool:
+    """tag 名后一个字符须为边界（正则 \b 口径）；到结尾也算边界。"""
+    return idx >= len(text) or not (text[idx].isalnum() or text[idx] == "_")
+
+
+def _find_block_open(lowered: str, start: int):
+    best = None
+    for tag in ("script", "style"):
+        pos = lowered.find("<" + tag, start)
+        while pos >= 0:
+            after = pos + 1 + len(tag)
+            if _tag_boundary_ok(lowered, after) and lowered.find(">", after) >= 0:
+                if best is None or pos < best[0]:
+                    best = (pos, tag)
+                break
+            pos = lowered.find("<" + tag, pos + 1)
+    return best
+
+
+def _find_block_close(lowered: str, pos: int, tag: str):
+    close = lowered.find("</" + tag, pos + 1)
+    while close >= 0:
+        after = close + 2 + len(tag)
+        gt = lowered.find(">", after)
+        if _tag_boundary_ok(lowered, after) and gt >= 0:
+            return gt + 1
+        close = lowered.find("</" + tag, close + 1)
+    return None
 
 
 def _epub_text(path) -> str:
     """zip 容器按成员名排序取 .xhtml/.html/.htm；成员间以空行连接（段落边界）。"""
+    parts = []
+    total = 0
     with zipfile.ZipFile(path) as zf:
-        parts = []
         for info in sorted(zf.infolist(), key=lambda i: i.filename):
             if not info.filename.lower().endswith(_EPUB_TEXT_EXTS):
                 continue
-            data = zf.read(info)
+            declared = int(info.file_size)
+            if _declared_member_oversized(info, declared):
+                raise ValueError("epub member oversized or suspicious compression ratio")
+            if total + declared > _MAX_DECOMPRESSED_TOTAL_BYTES:
+                raise ValueError("epub decompressed total oversized")
+            with zf.open(info) as fh:
+                data = fh.read(_MAX_DECOMPRESSED_MEMBER_BYTES + 1)
+            if len(data) > _MAX_DECOMPRESSED_MEMBER_BYTES:
+                raise ValueError("epub member oversized")
+            total += len(data)
             try:
                 text = data.decode("utf-8")
             except UnicodeDecodeError:
                 text = data.decode("gb18030")  # strict：失败即 undecodable，不猜
             parts.append(_html_to_text(text))
-        return "\n\n".join(parts)
+    return "\n\n".join(parts)
+
+
+def _declared_member_oversized(info, declared: int) -> bool:
+    """声明尺寸/压缩比预筛（先于解压，防高压缩炸弹）。"""
+    if declared > _MAX_DECOMPRESSED_MEMBER_BYTES:
+        return True
+    comp = max(int(info.compress_size), 1)
+    return declared > _MIN_RATIO_SAMPLE_BYTES and declared > _MAX_COMPRESSION_RATIO * comp
 
 
 def _docx_text(path) -> str:
@@ -433,7 +532,15 @@ def _docx_text(path) -> str:
     from xml.etree import ElementTree as ET
 
     with zipfile.ZipFile(path) as zf:
-        root = ET.fromstring(zf.read("word/document.xml"))
+        info = zf.getinfo("word/document.xml")
+        declared = int(info.file_size)
+        if _declared_member_oversized(info, declared):
+            raise ValueError("docx document.xml oversized or suspicious compression ratio")
+        with zf.open(info) as fh:
+            data = fh.read(_MAX_DECOMPRESSED_MEMBER_BYTES + 1)
+    if len(data) > _MAX_DECOMPRESSED_MEMBER_BYTES:
+        raise ValueError("docx document.xml oversized")
+    root = ET.fromstring(data)
     paragraphs: list[str] = []
     for p in root.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"):
         runs = [
