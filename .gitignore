@@ -22,3 +22,8 @@ prototype/
 # 系统
 .DS_Store
 Thumbs.db
+
+# issue #44：144MB 本地 wheel 缓存不入库（保留 pyproject 锁定依赖）
+wheels/
+# issue #45：本地草稿区（交接/审计文档已入历史）不入库
+.scratch/
