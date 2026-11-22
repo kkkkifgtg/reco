@@ -27,3 +27,12 @@ Thumbs.db
 wheels/
 # issue #45：本地草稿区（交接/审计文档已入历史）不入库
 .scratch/
+
+# 本机工具状态（非项目产物，不入库）
+.agent-teams/
+.deja/
+# DSH 插件自动生成（会被插件重写，入库存无意义 diff）
+docs/agents/workspace.yaml
+docs/agents/label-colors.yaml
+# 与本项目无关的独立小工具（如需纳入版本库请先移到 scripts/ 下）
+telegra_downloader.py
