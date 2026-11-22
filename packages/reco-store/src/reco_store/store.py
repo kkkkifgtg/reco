@@ -865,6 +865,13 @@ class Store:
 
 
 def _dump_rows(db_path: str | Path, table: str) -> list[tuple]:
+    """整表快照（重放比对用）：表名只能取自 COMPARE_TABLES 白名单。
+
+    表名走 SQL 拼接（SQLite 不支持参数化标识符），因此必须显式白名单把关：
+    调用方目前只传 COMPARE_TABLES 成员，此断言防未来误用（Semgrep 告警据此消除）。
+    """
+    if table not in COMPARE_TABLES:
+        raise ValueError(f"_dump_rows 只接受 COMPARE_TABLES 内的表名: {table!r}")
     conn = sqlite3.connect(db_path)
     try:
         return conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
