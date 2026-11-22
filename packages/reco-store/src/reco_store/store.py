@@ -604,8 +604,15 @@ def _apply_event(conn: sqlite3.Connection, event: Event) -> None:
 
 # ---------------------------------------------------------------- Store
 
+# PRAGMA 语句写成常量字面量：值来自 Synchronous 枚举（编译期常量），
+# 不拼接、不插值（Code Scanning #6 的消除方式）。
+_PRAGMA_SYNCHRONOUS = "PRAGMA synchronous = 1"   # Synchronous.NORMAL
+_PRAGMA_BUSY_TIMEOUT = "PRAGMA busy_timeout = 5000"
+
+
 def _configure(conn: sqlite3.Connection, *, writer: bool) -> None:
-    conn.execute(f"PRAGMA synchronous = {Synchronous.NORMAL.value}")
+    conn.execute(_PRAGMA_SYNCHRONOUS)
+    conn.execute(_PRAGMA_BUSY_TIMEOUT)
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA foreign_keys = ON")
     if writer:
