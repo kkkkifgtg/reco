@@ -1,5 +1,8 @@
 """工单 12 切片 3：喜欢/候选板块 + 异步加载（QThreadPool）+ in-flight 去重 + 超时分级。
 
+跨包集成测试（CODING-STANDARDS §2 显式标注）：fixture 经 reco_store 建库，
+独立 venv 只装 reco-ui 时不可运行；全量套件可用 `-m "not integration"` 分组。
+
 - §11.1：UI 线程只发起+渲染，zone 查询全在 QRunnable worker；
 - §11.2 坑 1：分级超时（慢库不打断事件循环）；坑 2：in-flight 去重；
 - §11.2 坑 3：「已加载」标记仅在加载成功后置位，失败可重试；
@@ -16,6 +19,8 @@ os_environ_set = os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from reco_ui.glue import seed_books
+
+pytestmark = pytest.mark.integration
 
 
 @pytest.fixture()

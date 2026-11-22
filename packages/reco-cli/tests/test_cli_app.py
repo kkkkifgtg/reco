@@ -1,5 +1,8 @@
 """工单 11：CLI 入口测试（红→绿）。
 
+跨包集成测试（CODING-STANDARDS §2 显式标注）：本模块 import reco_store/reco_core，
+独立 venv 只装 reco-cli 时不可运行；全量套件可用 `-m "not integration"` 分组。
+
 验收映射（.scratch/reco-impl/issues/11-cli.md + auditor W11 预案）：
   C1 六子命令 + exit 语义        C2 UTF-8 输出回归（修 T0 占位乱码）
   C3 report 诊断 JSON 无正文    C4 recommend JSON 纯净 + C6 小样本文案
@@ -21,6 +24,8 @@ from pathlib import Path
 import pytest
 
 from reco_cli import main
+
+pytestmark = pytest.mark.integration
 
 NOW = "2026-11-21T06:00:00+00:00"
 CFG_FP = "t15/cli"
