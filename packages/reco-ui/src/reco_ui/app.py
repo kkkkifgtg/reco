@@ -678,13 +678,17 @@ class RecommendPage(QWidget):
             if not src.is_file():
                 return
             row = (str(src), "liked")
-        worker = LikeMoveWorker(self._store, str(row[0]), str(row[1]),
-                                str(self._data_root))
+        worker = LikeMoveWorker(self._store, str(row[1]), str(self._data_root),
+                                src_path=str(row[0]))
         worker.signals.done.connect(self._on_like_move_done)
         QThreadPool.globalInstance().start(worker)
 
-    def _on_like_move_done(self, ok: bool, error: str) -> None:
-        """真移动完成：成功重放 rank 输出（移出的书从候选集消失）；失败报错可重试。"""
+    def _on_like_move_done(self, ok: bool, rows: list, error: str) -> None:
+        """真移动完成：成功重放 rank 输出（移出的书从候选集消失）；失败报错可重试。
+
+        rows 为 worker 回传的重查结果（行重查在 worker 线程，§11.1）；推荐页
+        只用 rank 重放渲染，故忽略 rows。
+        """
         if not ok:
             self._status.setText(f"移动失败（可重试）：{error}")
             return
