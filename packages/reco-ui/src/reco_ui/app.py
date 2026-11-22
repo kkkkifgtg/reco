@@ -6,6 +6,7 @@ worker（切片 2 起接 reco_ui.workers）。本切片落骨架、导航与按�
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from reco_io.perf import perf_span
