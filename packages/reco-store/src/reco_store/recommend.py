@@ -29,6 +29,7 @@ __all__ = [
     "load_profile",
     "load_vectors",
     "mute_map_from_store",
+    "persist_rank_run",
     "rank_candidates",
 ]
 
@@ -193,3 +194,51 @@ def rank_candidates(store) -> dict:
     out["n_vectors"] = len(positive_vectors)  # 库级：空态区分「是否已生产向量」
     out["n_skipped"] = max(0, len(candidate_books) - candidate_vector_count)
     return out
+
+
+# ---------------------------------------------------------------- 推荐落库（#70）
+def persist_rank_run(store, out, *, now: str, actor: str,
+                     run_id: str | None = None, profile_version=None) -> str:
+    """把 rank 输出写入 rec_runs + recommendations（架构文档 §721 的承诺）。
+
+    - 唯一写入路径：GUI 与 CLI 共用（避免两套逻辑漂移）；
+    - run_id 未给则按时间戳+候选数生成；给定则复用它（便于幂等重写）；
+    - 文本/评分原样落库，reasons 序列化为 JSON（零正文，只含轴名与数值）。
+    """
+    import json
+    from datetime import datetime, timezone
+
+    rows = list(out.get("rank_rows") or ())
+    if run_id is None:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+        run_id = f"run-{stamp}-{len(rows)}"
+
+    items = []
+    for row in rows:
+        reasons = [
+            {"axis": r.axis, "contribution": float(r.contribution), "source": r.source}
+            for r in (getattr(row, "reasons", None) or ())
+        ]
+        items.append({
+            "book_id": str(row.book_id),
+            "rank": int(row.rank),
+            "score": float(row.score),
+            "reasons_json": json.dumps(reasons, ensure_ascii=False),
+            "is_exploration": bool(getattr(row, "is_exploration", False)),
+        })
+
+    store.append_event(
+        "rec_generated",
+        payload={
+            "run_id": str(run_id),
+            "candidate_count": int(out.get("n_candidates") or 0),
+            "exploration_count": sum(1 for i in items if i["is_exploration"]),
+            "items_json": json.dumps(items, ensure_ascii=False),
+            "profile_version": profile_version,
+        },
+        occurred_at=str(now),
+        config_fingerprint="rec/persist/1",
+        actor=str(actor),
+    )
+    return str(run_id)
+

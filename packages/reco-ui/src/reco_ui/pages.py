@@ -421,10 +421,19 @@ class RankLoader(QRunnable):
 
     def run(self) -> None:
         try:
-            from reco_store.recommend import rank_candidates
+            from reco_store.recommend import persist_rank_run, rank_candidates
 
             with perf_span("ui.rank.load"):
                 out = rank_candidates(self._store)
+                # #70：推荐结果落库（rec_runs + recommendations），与 CLI 共用同一路径
+                # 失败不中断展示，但必须可见（静默吞异常曾掩盖真实 bug）
+                try:
+                    persist_rank_run(self._store, out, now=_utcnow_iso(), actor="gui")
+                except Exception as exc:
+                    import sys as _sys
+
+                    print(f"warn: 推荐落库失败（{type(exc).__name__}: {exc}）",
+                          file=_sys.stderr)
         except Exception as exc:  # UI 只收字符串消息，不收异常对象
             self._emit(None, f"{type(exc).__name__}: {exc}")
             return

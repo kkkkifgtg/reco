@@ -33,6 +33,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("recommend", help="推荐列表（rank 唯一入口）")
     p.add_argument("--db", required=True)
     p.add_argument("--json", action="store_true", default=True)
+    p.add_argument("--persist", action="store_true",
+                   help="把本次推荐落库（rec_runs/recommendations）；默认只读")
 
     p = sub.add_parser("feedback", help="反馈入口（dislike/like/add_to_pool）")
     p.add_argument("kind", choices=["dislike", "like", "add_to_pool"])
@@ -84,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
     if ns.command == "extract":
         return app.cmd_extract(ns.db, limit=ns.limit)
     if ns.command == "recommend":
-        return app.cmd_recommend(ns.db, as_json=ns.json)
+        return app.cmd_recommend(ns.db, as_json=ns.json, persist=getattr(ns, "persist", False))
     if ns.command == "feedback":
         return app.cmd_feedback(ns.kind, db=ns.db, book_id=ns.book_id,
                                 axis=ns.axis, value=ns.value)

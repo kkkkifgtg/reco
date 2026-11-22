@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import json
 import os
 import sqlite3
@@ -208,18 +210,32 @@ def _confidence_dict(conf) -> dict:
             "value": float(conf.value), "display": conf.display}
 
 
-def cmd_recommend(db, *, as_json=True) -> int:
+def _utcnow_iso() -> str:
+    """当前 UTC 时间（ISO-8601 带时区），事件落库统一口径。"""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+def cmd_recommend(db, *, as_json=True, persist=False) -> int:
     """推荐列表：共享装配层 → rank 唯一入口（A6；W13 真实向量接线，零复制 §13）。
 
     装配（库态→rank 输入）与 GUI 同源（reco_store.recommend.rank_candidates）；
     本入口只做输出序列化，零排序、零装配复制。
     """
-    from reco_store.recommend import rank_candidates
+    from reco_store.recommend import persist_rank_run, rank_candidates
 
     with perf_span("cli.recommend"):
         store = open_store(db)
         try:
             out = rank_candidates(store)
+            # #70：默认不落库——C7 契约要求 recommend 是只读入口（零事件写入）。
+            # 需要留痕时显式 --persist；GUI 侧则因用户主动点击而落库。
+            if persist:
+                try:
+                    persist_rank_run(store, out, now=_utcnow_iso(), actor="cli")
+                except Exception as exc:
+                    print(f"warn: 推荐落库失败（{type(exc).__name__}: {exc}）",
+                          file=sys.stderr)
             conf = out["profile"].confidence
             payload = {
                 "items": [

@@ -551,6 +551,10 @@ def _apply_event(conn: sqlite3.Connection, event: Event) -> None:
              p.get("event_id_high_water"), event.schema_version, event.config_fingerprint),
         )
     elif t == "rec_generated":
+        # 幂等：同一 run_id 重放/重写时先清旧行（rec_runs.run_id 是主键，
+        # recommendations 以 run_id 外键关联；重复插入会撞 UNIQUE）
+        conn.execute("DELETE FROM recommendations WHERE run_id = ?", (p["run_id"],))
+        conn.execute("DELETE FROM rec_runs WHERE run_id = ?", (p["run_id"],))
         conn.execute(
             "INSERT INTO rec_runs(run_id, created_at, actor, profile_version, candidate_count,"
             " exploration_count, config_fingerprint) VALUES(?,?,?,?,?,?,?)",
