@@ -73,7 +73,9 @@ def zone_page_rows(store, zone: str, *, limit: int = 200, lib_ms: float = 800.0)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     if elapsed_ms > lib_ms:
         raise TimeoutError(f"zone={zone!r} 查询 {elapsed_ms:.0f}ms 超出分级超时上限 {lib_ms:.0f}ms")
-    return [(r[0], r[1], r[2], "") for r in raw]
+    # 第 4 字段（备注）必须透传：glue.zone_rows 会填「另见：其他专区」标注（#74）。
+    # 修复前这里硬编码空串，导致标注算出来却被丢弃，GUI 完全看不到提示。
+    return [(r[0], r[1], r[2], r[3] if len(r) > 3 else "") for r in raw]
 
 
 def profile_rows(store) -> dict:

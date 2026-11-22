@@ -52,8 +52,18 @@ def seed_books(store: Store, *, books: int, liked: int, candidate: int, now=None
     return names
 
 
+_ZONE_DISPLAY = {"liked": "喜欢专区", "candidate": "候选池", "推荐专区": "推荐专区"}
+
+
 def zone_rows(store: Store, zone: str, *, limit: int = 200) -> list[tuple]:
-    """专区行读取（独立只读连接；行 = (book_id, 名称, 大小)，无正文，B 类审计点）。"""
+    """专区行读取（独立只读连接；无正文，B 类审计点）。
+
+    行 = (book_id, 名称, 大小, 备注)。
+
+    #74：同一本书可能在多个专区各有一份实体文件（用户手动复制或历史遗留）。
+    此时在备注列标注「另见：<其他专区>」，让用户看得见、自己决定；
+    **不删除任何文件、不改变 book 归属**（擅自处理用户文件风险过高）。
+    """
     conn = store.read_conn()
     try:
         raw = conn.execute(
@@ -63,9 +73,30 @@ def zone_rows(store: Store, zone: str, *, limit: int = 200) -> list[tuple]:
             " ORDER BY b.book_id LIMIT ?",
             (zone, int(limit)),
         ).fetchall()
+        # 该页所有 book_id 在其他专区的分布
+        ids = [int(r[0]) for r in raw]
+        others: dict[int, set[str]] = {}
+        if ids:
+            marks = ",".join("?" * len(ids))
+            for bid, z in conn.execute(
+                f"SELECT DISTINCT book_id, zone FROM files"
+                f" WHERE present = 1 AND zone <> ? AND book_id IN ({marks})",
+                (zone, *ids),
+            ).fetchall():
+                others.setdefault(int(bid), set()).add(str(z))
     finally:
         conn.close()
-    return [(int(r[0]), str(r[1]), int(r[2])) for r in raw]
+
+    out: list[tuple] = []
+    for r in raw:
+        bid = int(r[0])
+        zones = others.get(bid) or set()
+        note = ""
+        if zones:
+            names = "、".join(_ZONE_DISPLAY.get(z, z) for z in sorted(zones))
+            note = f"另见：{names}"
+        out.append((bid, str(r[1]), int(r[2]), note))
+    return out
 
 
 def _dedup_of(store: Store, book_id: int) -> str | None:
