@@ -217,10 +217,25 @@ class StoreAdapter:
             moved += 1
         return moved
 
-    def append_event(self, kind: str, payload: Mapping, occurred_at: str) -> None:
+    def append_event(self, kind: str, payload: Mapping, occurred_at: str,
+                     *, book_id: int | None = None) -> None:
         """labels 事件 → reco-store 事件词汇分派（payload 只送白名单键，不误映射）。"""
         at = str(occurred_at)
-        if kind == "tag_archived":
+        if kind == "relation_updated":
+            # 关系图事件：必须带 book_id（relation_graphs 以 book_id 为主键）
+            if book_id is None:
+                raise ValueError("relation_updated 事件缺 book_id")
+            self._store.append_event(
+                "relation_updated",
+                payload={
+                    "graph_json": str(payload.get("graph_json") or ""),
+                    "extractor_version": str(payload.get("extractor_version") or ""),
+                    "confidence": float(payload.get("confidence") or 0.0),
+                },
+                book_id=int(book_id),
+                occurred_at=at, config_fingerprint=_ADAPTER_FP,
+            )
+        elif kind == "tag_archived":
             self._store.append_event(
                 "tag_archived", payload={"tag_id": str(payload.get("tag_id") or "")},
                 occurred_at=at, config_fingerprint=_ADAPTER_FP,
@@ -410,9 +425,56 @@ def auto_tag_book(
         )
         proposed = tuple(p.candidate for p in proposals)
     skipped = not hits and not proposed
+    # 关系图：有标签命中才提取并落库（无标签不造假图）
+    if hits:
+        _persist_relation_graph(store, book_id, stats, hits, now=now)
     return AutoTagOutcome(
         book_id=book_id, zone=zone, skipped=skipped, hits=hits,
         record=record, proposed=proposed,
+    )
+
+
+def _stats_mapping(stats) -> dict:
+    """stats → dict：兼容 Mapping / 带 __dict__ 的对象 / None。
+
+    match_tags 收的是 duck-typed stats（真实链路里是 SimpleNamespace 或 dict），
+    这里统一转成 extract_relation_graph 需要的纯字典。
+    """
+    if stats is None:
+        return {}
+    if isinstance(stats, dict):
+        return dict(stats)
+    data = getattr(stats, "__dict__", None)
+    if isinstance(data, dict):
+        return dict(data)
+    try:
+        return dict(stats)
+    except (TypeError, ValueError):
+        return {}
+
+
+def _persist_relation_graph(store, book_id: int, stats, hits, *, now: str) -> None:
+    """标签命中 → 关系图 → relation_updated 事件（#69：此前无任何生产调用点）。
+
+    输入按 extract_relation_graph 契约：stats 是数值统计量，alias_weights 是
+    标签 id → 0-1 权重（用命中置信度）。同一本书重复提取由 store 投影 upsert
+    保证幂等（relation_graphs 以 book_id 为主键）。
+    """
+    import json
+
+    from reco_relations.extract import extract_relation_graph
+
+    weights = {hit.tag_id: float(hit.confidence) for hit in hits}
+    graph = extract_relation_graph(_stats_mapping(stats), weights)
+    store.append_event(
+        "relation_updated",
+        {
+            "graph_json": json.dumps(graph, ensure_ascii=False, sort_keys=True),
+            "extractor_version": "reco-relations/1",
+            "confidence": float(graph.get("evidence", {}).get("confidence", 0.0)),
+        },
+        now,
+        book_id=int(book_id),
     )
 
 

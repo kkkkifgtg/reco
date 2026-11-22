@@ -14,6 +14,7 @@ from typing import Iterable, Mapping, Protocol, Sequence, runtime_checkable
 EVENT_KINDS = frozenset({
     "tag_merged", "tag_archived", "tag_created", "tag_conflict",
     "tag_proposed", "proposal_accepted", "proposal_rejected",
+    "relation_updated",  # #69：关系图事件（book_id 为主键）
 })
 
 
@@ -99,7 +100,7 @@ class LabelsStore(Protocol):
                         confidence: float, basis_json: str, updated_at: str) -> None: ...
     def redirect_book_tag_rows(self, source_tag: str, target_tag: str) -> int: ...
     def append_event(self, kind: str, payload: Mapping[str, object],
-                     occurred_at: str) -> None: ...
+                     occurred_at: str, *, book_id: int | None = None) -> None: ...
     def insert_proposal(self, kind: str, candidate: str,
                         payload: Mapping[str, object], created_at: str) -> str: ...
     def update_proposal_status(self, proposal_id: str, status: str) -> None: ...
@@ -169,7 +170,7 @@ class InMemoryLabelsStore:
         return moved
 
     def append_event(self, kind: str, payload: Mapping[str, object],
-                     occurred_at: str) -> None:
+                     occurred_at: str, *, book_id: int | None = None) -> None:
         if kind not in EVENT_KINDS:
             raise ValueError(f"未知事件类型: {kind}")
         self._s.event_seq += 1
