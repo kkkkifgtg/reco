@@ -39,6 +39,7 @@ from reco_ui.pages import (
     zone_page_rows,
 )
 from reco_ui.preload import Preloader
+from reco_ui.proposals_page import ProposalsPage
 from reco_ui.reader_page import ReaderPage
 from reco_ui.tables import RankTableModel
 from reco_ui.theme import apply_dark_theme
@@ -156,6 +157,12 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._reader)
         self._reader.back_requested.connect(self._close_reader)
         self._pages["reader"] = self._reader  # ui_usage("reader") 预热热集可解析（PAGE_ORDER 仍 4 页）
+        # #48：待确认提案页常驻 stack，从画像页进入（不进 PAGE_ORDER/nav，保持 4 页契约）
+        self._proposals = ProposalsPage(self._store)
+        self._stack.addWidget(self._proposals)
+        self._pages["proposals"] = self._proposals
+        self._proposals.back_requested.connect(self._close_proposals)
+        self._pages["profile"].proposals_requested.connect(self._open_proposals)
         self._nav.currentRowChanged.connect(self._on_nav)
         self.page_requested.connect(self._start_load)  # UI 线程只发起（§11.1）
         self._nav.setCurrentRow(2)  # 默认推荐专区（恒热，§11.7）
@@ -237,6 +244,18 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._reader.open_book(path, book_id)
+
+    def _open_proposals(self) -> None:
+        """#48：从画像页进入待确认提案页（记录来源页，返回时切回）。"""
+        self._proposals_origin = self._nav.currentRow()
+        self._proposals.refresh()
+        self._stack.setCurrentWidget(self._proposals)
+
+    def _close_proposals(self) -> None:
+        """返回进入前的页面。"""
+        row = getattr(self, "_proposals_origin", 2)
+        if 0 <= row < len(PAGE_ORDER):
+            self._stack.setCurrentWidget(self._pages[PAGE_ORDER[row]])
 
     def _close_reader(self) -> None:
         """返回按钮：close_book 内 flush 进度，再切回来源页并恢复标题。"""
@@ -462,6 +481,8 @@ class MainWindow(QMainWindow):
 class ProfilePage(QWidget):
     """画像页：轴权重/样本量/置信度/Top-N/漂移/版本（C6 诚实展示）。"""
 
+    proposals_requested = pyqtSignal()
+
     def __init__(self, store=None, parent=None) -> None:
         super().__init__(parent)
         self._store = store
@@ -475,6 +496,10 @@ class ProfilePage(QWidget):
         self._summary.setObjectName("dim")
         self._summary.setWordWrap(True)
         layout.addWidget(self._summary)
+        # #48：待确认提案入口（提案页常驻 stack，不进导航）
+        self.btn_proposals = QPushButton("待确认提案")
+        self.btn_proposals.clicked.connect(self.proposals_requested.emit)
+        layout.addWidget(self.btn_proposals)
         layout.addStretch(1)
 
     def refresh(self) -> None:
