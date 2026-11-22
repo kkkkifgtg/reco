@@ -693,6 +693,20 @@ class RecommendPage(QWidget):
     def mark_loaded(self) -> None:
         self.loaded = True  # 「已加载」仅在按需/预热成功后置位（§11.2 坑 3）
 
+    @staticmethod
+    def _parse_rank_book_id(raw) -> int | None:
+        """rank 书号 "b<N>" → 整数 book_id；无法解析返回 None。
+
+        三按钮（不合口味/标为喜欢/加入候选池）共用同一解析，避免各自实现漂移
+        （#72 的根因就是 _move_liked 有 lstrip、_feedback 没有）。
+        """
+        text = str(raw).strip()
+        digits = text[1:] if text[:1] in ("b", "B") else text
+        try:
+            return int(digits)
+        except (TypeError, ValueError):
+            return None
+
     def _feedback(self, kind: str, axis) -> None:
         """发起反馈：写库投递线程池（UI 线程零阻塞，§11.1）；连点防护=反馈侧 in-flight 去重（坑 2）。"""
         if self._store is None:
@@ -703,9 +717,15 @@ class RecommendPage(QWidget):
         if kind == "like":
             self._move_liked(raw)  # W19 N2：like 升级真移动
             return
+        # #72：rank 输出的书号命名空间是 "b<N>"，必须先剥离 b 前缀再转整数。
+        # 修复前这里直接 int("b203") → ValueError，点击即崩（负样本入口全废）。
+        book_id = self._parse_rank_book_id(raw)
+        if book_id is None:
+            self._status.setText(f"反馈失败：书号无法解析（{raw}）")
+            return
         for b in (self.btn_dislike, self.btn_like, self.btn_pool):
             b.setEnabled(False)  # in-flight：按钮禁用防双写
-        worker = FeedbackWorker(self._store, kind, int(raw), axis=axis)
+        worker = FeedbackWorker(self._store, kind, book_id, axis=axis)
         worker.signals.done.connect(self._on_feedback_done)
         QThreadPool.globalInstance().start(worker)
 
