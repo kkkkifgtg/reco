@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 
@@ -23,7 +24,7 @@ from reco_labels import (
 from reco_labels.auto_tag import StoreAdapter
 from reco_labels.seed import build_seed_rows
 from reco_store import open_store
-from reco_store.store import _ALLOWED_KEYS, dedup_key
+from reco_store.store import _ALLOWED_KEYS, dedup_key, rebuild_projections
 
 NOW = "2026-11-21T00:00:00"
 
@@ -75,6 +76,15 @@ def _scalar(raw, sql: str, params=()):
     return _db(raw, sql, params)[0][0]
 
 
+def _db_conn_rows(db_path, table: str):
+    """逐位行快照（proposals/tags 不在 COMPARE_TABLES 时的显式重放比对）。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+    finally:
+        conn.close()
+
+
 def _event_types(raw):
     return [row[0] for row in _db(raw, "SELECT event_type FROM events")]
 
@@ -109,14 +119,20 @@ def test_auto_tag_new_words_land_pending_proposals_on_real_store(tmp_path):
     assert all(p.kind == "tag" for p in pending)
     assert all(p.proposal_id.isdigit() for p in pending)
 
-    # proposal_created 事件 payload 只含白名单键（业务负载进 payload_json 列）
+    # proposal_created 事件 payload 只含白名单键；业务负载作为标量 JSON 字符串
+    # 随事件一体落库（T8/#40：事件即真相源，提案内容重放可恢复）
     created = [json.loads(row[0]) for row in _db(
         raw, "SELECT payload_json FROM events WHERE event_type='proposal_created'")]
     assert len(created) == 2
     for payload in created:
         assert set(payload) <= _ALLOWED_KEYS
-        assert set(payload) == {"kind"}
+        assert set(payload) == {"kind", "payload_json", "evidence_json"}
+        assert json.loads(payload["payload_json"])["candidate"] in {"夺舍", "摄心术"}
     assert raw.verify_replay().ok
+    # 提案内容逐位可重建（proposals 不在 COMPARE_TABLES，显式比对）
+    target = tmp_path / "rebuilt-proposals.db"
+    rebuild_projections(target, raw.read_events())
+    assert _db_conn_rows(target, "proposals") == _db_conn_rows(raw.path, "proposals")
 
 
 def test_iter_proposals_reads_candidate_from_payload_json(tmp_path):
@@ -174,11 +190,10 @@ def test_redirect_moves_auto_rows_via_events(tmp_path):
 
 
 def test_merge_tags_maps_merged_state_without_proposal(tmp_path):
-    """merge_tags 全链路：redirect 事件搬迁 + 合并态补写投影（store 契约缺口②）。
+    """merge_tags 全链路：redirect 事件搬迁 + 合并态经 tag_merged 事件投影（T8/#41）。
 
-    reco-store 的 tag_merged 事件投影读 p["into"]，但其 payload 白名单不含 into
-    （见 StoreAdapter 类 docstring），故合并态投影不经事件流——本测不断言
-    verify_replay（该限制已由 store 侧后续票跟踪）。
+    into 已进 payload 白名单：合并态（tags.status/merged_into + 合并别名）由 store
+    投影在同一事务完成，不再有队列旁路补写——verify_replay 与逐位重建都必须绿。
     """
     raw, adapter = _open(tmp_path)
     _seed(adapter)
@@ -197,6 +212,12 @@ def test_merge_tags_maps_merged_state_without_proposal(tmp_path):
             if r.book_id == book_id}
     assert rows == {("mech.驯化", "auto")}
     assert _proposal_count(raw) == 0
+    assert "tag_merged" in _event_types(raw)  # #41 之前：合法事件不可构造
+    assert raw.verify_replay().ok
+    target = tmp_path / "rebuilt-merge.db"
+    rebuild_projections(target, raw.read_events())
+    assert _db_conn_rows(target, "tags") == _db_conn_rows(raw.path, "tags")
+    assert _db_conn_rows(target, "tag_aliases") == _db_conn_rows(raw.path, "tag_aliases")
 
 
 def test_update_proposal_status_and_accept_reject(tmp_path):

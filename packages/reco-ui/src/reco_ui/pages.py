@@ -159,7 +159,7 @@ ALLOWED_IMPORT_EXTS = set(_SCAN_TEXT_EXTS) | {".docx", ".pdf"}
 
 
 class ImportSignals(QObject):
-    done = pyqtSignal(int, int, int, str)  # (imported, skipped, rejected, error)
+    done = pyqtSignal(int, int, int, list, str)  # (imported, skipped, rejected, rows, error)
 
 
 class ImportWorker(QRunnable):
@@ -220,11 +220,19 @@ class ImportWorker(QRunnable):
             error = ""
         except Exception as exc:  # UI 只收字符串
             error = f"{type(exc).__name__}: {exc}"
-        self._emit(imported, skipped, rejected, error)
+        rows = self._query_rows()
+        self._emit(imported, skipped, rejected, rows, error)
 
-    def _emit(self, imported: int, skipped: int, rejected: int, error: str) -> None:
+    def _query_rows(self) -> list:
+        """导入后重查本专区行（worker 线程，§11.1 UI 线程零 DB）。"""
         try:
-            self.signals.done.emit(imported, skipped, rejected, error)
+            return list(zone_page_rows(self._store, self._zone))
+        except Exception:
+            return []
+
+    def _emit(self, imported: int, skipped: int, rejected: int, rows: list, error: str) -> None:
+        try:
+            self.signals.done.emit(imported, skipped, rejected, list(rows), error)
         except RuntimeError:
             pass  # 接收方已销毁
         finally:
@@ -277,7 +285,7 @@ class ScanWorker(QRunnable):
         finally:
             _ACTIVE_IMPORTS.discard(self)
 class LikeMoveSignals(QObject):
-    done = pyqtSignal(bool, str)  # (成功?, error)；error 非空 = 失败
+    done = pyqtSignal(bool, list, str)  # (ok, rows, error)  # (成功?, error)；error 非空 = 失败
 
 
 class LikeMoveWorker(QRunnable):
@@ -287,26 +295,55 @@ class LikeMoveWorker(QRunnable):
     落库（zone 变更）」。失败路径：不落任何事件，error 字符串回 UI。
     """
 
-    def __init__(self, store, src_path: str, src_zone: str, data_root: str) -> None:
+    def __init__(self, store, src_zone: str, data_root: str, *, src_path: str | None = None,
+                 row: int | None = None) -> None:
         super().__init__()
         self._store = store
-        self._src_path = src_path
         self._src_zone = src_zone
         self._data_root = str(data_root)
+        self._src_path = src_path
+        self._row = row
         self.signals = LikeMoveSignals()
         _ACTIVE_MOVES.add(self)
 
     def run(self) -> None:
         try:
-            move_book_to_liked(self._store, self._src_path,
+            src_path = self._src_path if self._src_path is not None else self._lookup_source()
+            if not src_path:
+                self._emit(False, [], "源文件不在本专区")
+                return
+            move_book_to_liked(self._store, src_path,
                                self._data_root, from_zone=self._src_zone)
-            self._emit(True, "")
         except Exception as exc:  # UI 只收字符串
-            self._emit(False, f"{type(exc).__name__}: {exc}")
+            self._emit(False, [], f"{type(exc).__name__}: {exc}")
+            return
+        self._emit(True, self._query_rows(), "")
 
-    def _emit(self, ok: bool, error: str) -> None:
+    def _lookup_source(self) -> str:
+        """按行号取本专区该书的现存路径（worker 线程，§11.1）。"""
+        rows = zone_page_rows(self._store, self._src_zone)
+        if self._row is None or not (0 <= int(self._row) < len(rows)):
+            return ""
+        book_id = int(rows[int(self._row)][0])
+        conn = self._store.read_conn()
         try:
-            self.signals.done.emit(ok, error)
+            row = conn.execute(
+                "SELECT path FROM files WHERE book_id = ? AND zone = ? AND present = 1"
+                " ORDER BY file_id LIMIT 1", (book_id, self._src_zone)).fetchone()
+        finally:
+            conn.close()
+        return str(row[0]) if row is not None else ""
+
+    def _query_rows(self) -> list:
+        """移动后重查本专区行（worker 线程，§11.1 UI 线程零 DB）。"""
+        try:
+            return list(zone_page_rows(self._store, self._src_zone))
+        except Exception:
+            return []
+
+    def _emit(self, ok: bool, rows: list, error: str) -> None:
+        try:
+            self.signals.done.emit(ok, list(rows), error)
         except RuntimeError:
             pass  # 接收方已销毁
         finally:
@@ -552,6 +589,7 @@ class ZonePage(QWidget):
     recommend_requested = pyqtSignal()  # F3：candidate 页「开始推荐」点击
     reload_requested = pyqtSignal()     # U2：「重试」按钮 → 主窗重新发起加载
     refresh_requested = pyqtSignal()    # N1：「刷新」按钮 → 主窗发起目录→库再扫描
+    reader_requested = pyqtSignal(str, object)  # RR1：双击作品 → 主窗打开阅读页 (path, book_id)
 
     def __init__(self, zone: str, store=None, parent=None, *, data_root=None) -> None:
         super().__init__(parent)
@@ -568,6 +606,7 @@ class ZonePage(QWidget):
         self._table = QTableView()
         self._model = ZoneTableModel()
         self._table.setModel(self._model)
+        self._table.doubleClicked.connect(self._on_double_clicked)  # RR1 T5：双击进阅读页
         layout.addWidget(self._table, 1)
         self._status = QLabel("待加载")
         self._status.setObjectName("dim")
@@ -602,6 +641,46 @@ class ZonePage(QWidget):
         """「打开文件夹」按钮（W16 F2）：data_root + zone 映射，ensure_zones 创建。"""
         open_zone_folder(self._data_root, self.zone)
 
+    # —— RR1 T5：双击作品 → 阅读页（查源路径；无源则状态行诚实提示）——
+    def _present_path(self, book_id: int) -> str | None:
+        """本专区该书的现存路径；无 files(present=1) 行 → None（不猜名字映射）。"""
+        if self._store is None:
+            return None
+        conn = self._store.read_conn()
+        try:
+            row = conn.execute(
+                "SELECT path FROM files WHERE book_id = ? AND zone = ? AND present = 1"
+                " ORDER BY file_id LIMIT 1", (int(book_id), self.zone)).fetchone()
+        finally:
+            conn.close()
+        return str(row[0]) if row is not None else None
+
+    def _on_double_clicked(self, index) -> None:
+        """双击行 → reader_requested(path, book_id)；行已失效/无源文件只报状态。
+
+        双击是用户即时手势：行与源路径同步取（单行点查，耗时可忽略），
+        打开后的正文加载才走 worker（ReaderLoadWorker）。#47 只覆盖导入回调
+        与移动发起两处 UI 线程读库，此处不在其范围。
+        """
+        if self._store is None or index is None or not index.isValid():
+            return
+        row = index.row()
+        if not (0 <= row < self._model.rowCount()):
+            return
+        try:
+            rows = zone_page_rows(self._store, self.zone)
+        except Exception as exc:  # UI 只收类名，正文/底层消息不上屏（§R3）
+            self._status.setText(f"打开失败：{type(exc).__name__}")
+            return
+        if not (0 <= row < len(rows)):
+            return
+        book_id = int(rows[row][0])
+        path = self._present_path(book_id)
+        if path is None or not os.path.isfile(path):  # 已移动/删除：不打开、只诚实提示
+            self._status.setText(f"文件缺失，无法打开：{rows[row][1]}")
+            return
+        self.reader_requested.emit(path, book_id)
+
     # —— W16 F1：拖拽导入 ——
     def dragEnterEvent(self, event) -> None:  # noqa: N802（Qt 命名）
         """扩展名白名单预筛（目录/非法扩展忽略，不进入 drop）。"""
@@ -633,61 +712,35 @@ class ZonePage(QWidget):
 
     # —— 工单 19 N2：右键「标为喜欢」真移动 ——
     def move_selected_book_to_liked(self, row: int) -> bool:
-        """发起真移动：UI 线程只取选行与查源（池线程做移动+落库，§11.1）。
+        """发起真移动：行与源路径查询在池线程（§11.1），移动+落库同在 worker。
 
-        返回 False = 无选中/空表/源不在本专区（零副作用）。
+        返回 False = 无选中/空表（零副作用）；True = 已发起（结果经完成信号回传）。
         """
         if self._store is None:
             return False
         if not (0 <= row < self._model.rowCount()):
             return False
-        try:
-            rows = zone_page_rows(self._store, self.zone)
-        except Exception:
-            return False
-        if not (0 <= row < len(rows)):
-            return False
-        book_id = int(rows[row][0])  # 行=(book_id,名称,大小,备注)
-        conn = self._store.read_conn()
-        try:
-            src_row = conn.execute(
-                "SELECT path FROM files WHERE book_id = ? AND zone = ? AND present = 1"
-                " ORDER BY file_id LIMIT 1", (int(book_id), self.zone)).fetchone()
-        finally:
-            conn.close()
-        if src_row is None:
-            return False
         self._status.setText("移动中…")
-        worker = LikeMoveWorker(self._store, str(src_row[0]), self.zone,
-                                self._data_root)
+        worker = LikeMoveWorker(self._store, self.zone, self._data_root, row=row)
         worker.signals.done.connect(self._on_move_done)
         QThreadPool.globalInstance().start(worker)
         return True
 
-    def _on_move_done(self, ok: bool, error: str) -> None:
-        """移动完成 → 本页重查（行随 zone 实况走）+ 状态摘要（刷新后写）。"""
+    def _on_move_done(self, ok: bool, rows: list, error: str) -> None:
+        """移动完成 → 渲染 worker 回传的行（行重查在 worker 线程，§11.1）。"""
         if not ok:
             self._status.setText(f"移动失败（可重试）：{error}")
-            return
-        try:
-            rows = zone_page_rows(self._store, self.zone)
-        except Exception as exc:
-            self.mark_failed(f"{type(exc).__name__}: {exc}")
             return
         self.apply_rows(rows)
         if self.zone_changed is not None:
             self.zone_changed(self)  # 对侧专区页同步重查（两表格联动，MainWindow 注入）
         self._status.setText("已移到喜欢专区")
 
-    def _on_import_done(self, imported: int, skipped: int, rejected: int, error: str) -> None:
-        """导入完成 → 重查本页行（apply_rows 复用）+ 状态摘要（摘要在刷新后写，不被覆盖）。"""
+    def _on_import_done(self, imported: int, skipped: int, rejected: int, rows: list,
+                        error: str) -> None:
+        """导入完成 → 渲染 worker 回传的行（行重查在 worker 线程，§11.1）。"""
         if error:
             self._status.setText(f"导入失败（可重试）：{error}")
-            return
-        try:
-            rows = zone_page_rows(self._store, self.zone)
-        except Exception as exc:
-            self.mark_failed(f"{type(exc).__name__}: {exc}")
             return
         self.apply_rows(rows)
         parts = [f"导入 {imported}"]

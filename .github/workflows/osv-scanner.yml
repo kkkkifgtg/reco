@@ -1,0 +1,25 @@
+# OSV-Scanner（Google）：依赖漏洞审计，覆盖 wheels/ 与包依赖的 CVE。
+name: OSV-Scanner 依赖审计
+on:
+  push:
+    branches: [master]
+  pull_request:
+jobs:
+  osv:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 OSV-Scanner v1.9.2
+        run: |
+          curl -sSL -o osv-scanner https://github.com/google/osv-scanner/releases/download/v1.9.2/osv-scanner_linux_amd64
+          chmod +x osv-scanner
+      - name: 扫描依赖
+        run: ./osv-scanner --recursive --format sarif --output osv.sarif .
+        continue-on-error: true
+      - uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: osv.sarif
+          category: osv-scanner
