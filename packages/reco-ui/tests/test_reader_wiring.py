@@ -112,6 +112,10 @@ def test_zone_double_click_emits_reader_requested(qapp, store, tmp_path):
     received: list[tuple] = []
     page.reader_requested.connect(lambda path, bid: received.append((path, bid)))
     page._table.doubleClicked.emit(page._model.index(0, 0))
+    # #58：双击的源查询在池线程 worker 内完成，需等 worker 收尾（断言不变）
+    from reco_ui.qt import QThreadPool
+
+    QThreadPool.globalInstance().waitForDone(8000)
     qapp.processEvents()
 
     assert received == [(str(book), book_id)]
@@ -133,6 +137,10 @@ def test_zone_double_click_without_source_reports_status(qapp, store, tmp_path):
     page.reader_requested.connect(lambda path, bid: received.append((path, bid)))
 
     page._table.doubleClicked.emit(page._model.index(0, 0))
+    # #58：源查询改走 worker，等其完成后再断言（断言内容不变）
+    from reco_ui.qt import QThreadPool
+
+    QThreadPool.globalInstance().waitForDone(8000)
     qapp.processEvents()
 
     assert received == []

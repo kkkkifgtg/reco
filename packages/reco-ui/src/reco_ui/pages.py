@@ -452,6 +452,60 @@ class ProfileLoader(QRunnable):
             _ACTIVE_LOADERS.discard(self)
 
 
+class BookSourceSignals(QObject):
+    """双击源查询信号：done(book_id, path, name, error)。"""
+
+    done = pyqtSignal(int, str, str, str)
+
+
+class BookSourceWorker(QRunnable):
+    """双击打开阅读页的源查询 worker：行与源路径都在池线程读取（§11.1 UI 线程零 DB）。
+
+    #58：原实现在 UI 线程调 zone_page_rows + read_conn；改为 worker 后
+    UI 线程只接收结果并决定是否发 reader_requested。
+    """
+
+    def __init__(self, store, zone: str, row: int) -> None:
+        super().__init__()
+        self._store = store
+        self._zone = zone
+        self._row = int(row)
+        self.signals = BookSourceSignals()
+        _ACTIVE_LOADERS.add(self)
+
+    def run(self) -> None:
+        try:
+            rows = zone_page_rows(self._store, self._zone)
+        except Exception as exc:  # UI 只收字符串/类名
+            self._emit(0, "", "", f"{type(exc).__name__}")
+            return
+        if not (0 <= self._row < len(rows)):
+            self._emit(0, "", "", "")
+            return
+        book_id = int(rows[self._row][0])
+        name = str(rows[self._row][1])
+        path = self._lookup_source(book_id)
+        self._emit(book_id, path, name, "")
+
+    def _lookup_source(self, book_id: int) -> str:
+        """本专区该书的现存路径；无 files(present=1) 行 → 空串（不猜名字映射）。"""
+        conn = self._store.read_conn()
+        try:
+            row = conn.execute(
+                "SELECT path FROM files WHERE book_id = ? AND zone = ? AND present = 1"
+                " ORDER BY file_id LIMIT 1", (int(book_id), self._zone)).fetchone()
+        finally:
+            conn.close()
+        return str(row[0]) if row is not None else ""
+
+    def _emit(self, book_id: int, path: str, name: str, error: str) -> None:
+        try:
+            self.signals.done.emit(int(book_id), path, name, error)
+        except RuntimeError:
+            pass  # UI 已销毁：迟到发射静默丢弃
+        finally:
+            _ACTIVE_LOADERS.discard(self)
+
 class ZoneLoader(QRunnable):
     """QRunnable zone 查询：结果/异常经信号回 UI 线程（UI 线程零 DB，§11.1）。"""
 
@@ -667,19 +721,22 @@ class ZonePage(QWidget):
         row = index.row()
         if not (0 <= row < self._model.rowCount()):
             return
-        try:
-            rows = zone_page_rows(self._store, self.zone)
-        except Exception as exc:  # UI 只收类名，正文/底层消息不上屏（§R3）
-            self._status.setText(f"打开失败：{type(exc).__name__}")
+        self._status.setText("打开中…")
+        worker = BookSourceWorker(self._store, self.zone, row)
+        worker.signals.done.connect(self._on_source_ready)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_source_ready(self, book_id: int, path: str, name: str, error: str) -> None:
+        """源查询结果 → 决定是否打开阅读页；缺失/失败只报状态（正文不上屏，§R3）。"""
+        if error:
+            self._status.setText(f"打开失败：{error}")
             return
-        if not (0 <= row < len(rows)):
+        if not path:
             return
-        book_id = int(rows[row][0])
-        path = self._present_path(book_id)
-        if path is None or not os.path.isfile(path):  # 已移动/删除：不打开、只诚实提示
-            self._status.setText(f"文件缺失，无法打开：{rows[row][1]}")
+        if not os.path.isfile(path):  # 已移动/删除：不打开、只诚实提示
+            self._status.setText(f"文件缺失，无法打开：{name}")
             return
-        self.reader_requested.emit(path, book_id)
+        self.reader_requested.emit(path, int(book_id))
 
     # —— W16 F1：拖拽导入 ——
     def dragEnterEvent(self, event) -> None:  # noqa: N802（Qt 命名）
