@@ -19,6 +19,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
+# #43 / CODING-STANDARDS §2：本文件跨包触达 reco_store，属集成测试，显式标注。
+pytestmark = pytest.mark.integration
+
 NOW = "2026-11-21T05:00:00+00:00"
 
 
