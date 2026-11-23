@@ -347,6 +347,51 @@ def test_recommend_page_has_no_like_dislike_buttons(store):
     page.deleteLater()
 
 
+
+
+
+def test_late_reader_request_from_liked_while_open_hides_buttons(qapp, store, tmp_path):
+    from reco_ui.qt import QApplication
+    """竞态回归（独立审查发现 + captain 实证）：阅读页开着时收到其他专区的
+    迟到 reader_requested，显隐必须跟随**本次请求的真实来源**，而非残留的
+    _reader_return_widget 旧来源。
+
+    场景：candidate 进入（正确显示）→ 阅读页开着时 emit liked.reader_requested(liked书)
+    → 必须隐藏（这本来自 liked）。当前实现靠 _reader_return_widget 反推且其不更新 → 红。
+    """
+    from reco_ui.app import MainWindow
+
+    lf, lbid = _seed_zone_file(store, tmp_path, "liked", "race-liked.txt")
+    cf, cbid = _seed_zone_file(store, tmp_path, "candidate", "race-cand.txt")
+
+    win = MainWindow(store=store, config={"data_root": str(tmp_path / "data")})
+    try:
+        # 第一次：从 candidate 正常进入 → 显示
+        win._reader_return_widget = win._pages.get("candidate")
+        win._open_reader(str(cf), cbid)
+        QApplication.processEvents()
+        assert win.reader_page.feedback_visible() is True
+
+        # 模拟 liked 页迟到回包：阅读页开着时直接 emit（BookSourceWorker 异步窗口）
+        win._pages["liked"].reader_requested.emit(str(lf), lbid)
+        QApplication.processEvents()
+        # 期望：这本书来自 liked → 隐藏。当前实现会用旧来源(candidate) → 红
+        assert win.reader_page.feedback_visible() is False, (
+            "迟到 reader_requested 必须按本次真实来源(liked)隐藏反馈按钮")
+
+        # 反向：liked 进入后，迟到 candidate 请求 → 必须显示
+        win._reader_return_widget = win._pages.get("liked")
+        win._open_reader(str(lf), lbid)
+        QApplication.processEvents()
+        assert win.reader_page.feedback_visible() is False
+        win._pages["candidate"].reader_requested.emit(str(cf), cbid)
+        QApplication.processEvents()
+        assert win.reader_page.feedback_visible() is True, (
+            "迟到 reader_requested 必须按本次真实来源(candidate)显示反馈按钮")
+    finally:
+        win.close()
+
+
 def test_zone_context_menu_has_no_feedback_actions(store):
     """专区右键菜单不再有「标为喜欢」「不合口味」。"""
     from reco_ui.pages import ZonePage

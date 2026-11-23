@@ -198,7 +198,11 @@ class MainWindow(QMainWindow):
         self._reader.zone_moved.connect(self._on_reader_zone_moved)
         # RR1 T5：双击作品 → 打开阅读页（ZonePage 只发信号，主窗决定切页）。
         for pid in ("liked", "candidate", "recommend"):
-            self._pages[pid].reader_requested.connect(self._open_reader)
+            # 绑定发起页：阅读页开着时收到另一专区的迟到 reader_requested，
+            # 显隐必须按本次请求的真实来源判定，不能靠残留的
+            # _reader_return_widget 反推（竞态回归测试 test_late_reader_request_*）。
+            self._pages[pid].reader_requested.connect(
+                lambda path, bid, src=self._pages[pid]: self._open_reader(path, bid, src))
         body = QWidget()
         body_layout = QHBoxLayout(body)
         body_layout.addWidget(side, 0)
@@ -229,7 +233,7 @@ class MainWindow(QMainWindow):
         return self._reader
 
     # —— RR1 T5：双击 → 阅读页 → 返回原页 ——
-    def _open_reader(self, path, book_id) -> None:
+    def _open_reader(self, path, book_id, source=None) -> None:
         """进入阅读页：记录来源页/标题 → 切 stack + 标题 + ui_usage bump("reader")。"""
         from datetime import datetime, timezone
 
@@ -241,16 +245,22 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(self._stack.indexOf(self._reader))
         self.setWindowTitle(f"{Path(path).name} · 阅读")
         # #80：反馈按钮显隐按来源专区判定——从「我喜欢」（liked）进阅读不显示
-        self._reader.open_book(path, book_id, from_zone=self._reader_source_zone())
+        self._reader.open_book(
+            path, book_id, from_zone=self._reader_source_zone(source))
         if self._store is not None:
             try:  # 性能统计走独立表（C12）；失败绝不挡住阅读
                 self._store.bump_ui_usage(
                     "reader", now=datetime.now(timezone.utc).isoformat())
             except Exception:
                 pass
-    def _reader_source_zone(self) -> str | None:
-        """进入阅读时的来源专区：liked/candidate/recommend（未知来源 → None）。"""
-        source = self._reader_return_widget
+    def _reader_source_zone(self, source=None) -> str | None:
+        """进入阅读时的来源专区：liked/candidate/recommend（未知来源 → None）。
+
+        source 缺省时回退 _reader_return_widget（旧直接调用兼容）；信号路径
+        必须传发起页本身——阅读页开着时的迟到请求，残留来源不可信。
+        """
+        if source is None:
+            source = self._reader_return_widget
         zone = getattr(source, "zone", None)
         if isinstance(zone, str) and zone:
             return zone
