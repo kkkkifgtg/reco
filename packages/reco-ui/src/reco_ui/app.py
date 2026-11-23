@@ -121,6 +121,8 @@ class MainWindow(QMainWindow):
         self._data_root = self._config.get("data_root", DEFAULT_DATA_ROOT)  # W16 配置注入
         self._pages: dict[str, PagePlaceholder] = {}
         self._inflight: set[str] = set()  # 坑 2：in-flight 去重
+        # F1：同页在途时排一次重载（in-flight 去重会吞掉重算请求 → 行过期残留）
+        self._pending_reload: set[str] = set()
         self._preloader = None  # W12b：骨架构建完成后在 _build_skeleton 末尾启动
         self._loaders: dict[str, ZoneLoader] = {}  # 持有运行中 loader 的 Python 引用（QThreadPool 不持包装）
         # RR1 T5：阅读页常驻实例（换书复用；不进 PAGE_ORDER/导航）+ 来源页记录。
@@ -155,7 +157,7 @@ class MainWindow(QMainWindow):
             self._stack.addWidget(page)
             QListWidgetItem(PAGE_LABELS[pid], self._nav)
         # RR1 T5：阅读页加入 stack（不进 PAGE_ORDER/nav），back_requested → 返回原页。
-        self._reader = ReaderPage(self._store)
+        self._reader = ReaderPage(self._store, data_root=self._data_root)
         self._stack.addWidget(self._reader)
         self._reader.back_requested.connect(self._close_reader)
         self._pages["reader"] = self._reader  # ui_usage("reader") 预热热集可解析（PAGE_ORDER 仍 4 页）
@@ -192,12 +194,15 @@ class MainWindow(QMainWindow):
         if hasattr(rec_page, "btn_refresh"):
             rec_page.refresh_requested.connect(
                 lambda checked=False: self._start_sync_refresh("推荐专区"))
-        # W19 N2：「我喜欢」真移动跨页联动——发起页 apply_rows 后，对侧专区页重查
-        self._pages["liked"].zone_changed = self._on_zone_changed
-        self._pages["candidate"].zone_changed = self._on_zone_changed
+        # #80：阅读界面「标为喜欢」真移动 → 两个专区页重查（发起在 worker，§11.1）
+        self._reader.zone_moved.connect(self._on_reader_zone_moved)
         # RR1 T5：双击作品 → 打开阅读页（ZonePage 只发信号，主窗决定切页）。
         for pid in ("liked", "candidate", "recommend"):
-            self._pages[pid].reader_requested.connect(self._open_reader)
+            # 绑定发起页：阅读页开着时收到另一专区的迟到 reader_requested，
+            # 显隐必须按本次请求的真实来源判定，不能靠残留的
+            # _reader_return_widget 反推（竞态回归测试 test_late_reader_request_*）。
+            self._pages[pid].reader_requested.connect(
+                lambda path, bid, src=self._pages[pid]: self._open_reader(path, bid, src))
         body = QWidget()
         body_layout = QHBoxLayout(body)
         body_layout.addWidget(side, 0)
@@ -228,7 +233,7 @@ class MainWindow(QMainWindow):
         return self._reader
 
     # —— RR1 T5：双击 → 阅读页 → 返回原页 ——
-    def _open_reader(self, path, book_id) -> None:
+    def _open_reader(self, path, book_id, source=None) -> None:
         """进入阅读页：记录来源页/标题 → 切 stack + 标题 + ui_usage bump("reader")。"""
         from datetime import datetime, timezone
 
@@ -239,13 +244,30 @@ class MainWindow(QMainWindow):
             self._reader_return_title = self.windowTitle()
         self._stack.setCurrentIndex(self._stack.indexOf(self._reader))
         self.setWindowTitle(f"{Path(path).name} · 阅读")
+        # #80：反馈按钮显隐按来源专区判定——从「我喜欢」（liked）进阅读不显示
+        self._reader.open_book(
+            path, book_id, from_zone=self._reader_source_zone(source))
         if self._store is not None:
             try:  # 性能统计走独立表（C12）；失败绝不挡住阅读
                 self._store.bump_ui_usage(
                     "reader", now=datetime.now(timezone.utc).isoformat())
             except Exception:
                 pass
-        self._reader.open_book(path, book_id)
+    def _reader_source_zone(self, source=None) -> str | None:
+        """进入阅读时的来源专区：liked/candidate/recommend（未知来源 → None）。
+
+        source 缺省时回退 _reader_return_widget（旧直接调用兼容）；信号路径
+        必须传发起页本身——阅读页开着时的迟到请求，残留来源不可信。
+        """
+        if source is None:
+            source = self._reader_return_widget
+        zone = getattr(source, "zone", None)
+        if isinstance(zone, str) and zone:
+            return zone
+        page_id = getattr(source, "page_id", None)
+        if isinstance(page_id, str) and page_id:
+            return page_id
+        return None
 
     def _open_proposals(self) -> None:
         """#48：从画像页进入待确认提案页（记录来源页，返回时切回）。"""
@@ -305,7 +327,10 @@ class MainWindow(QMainWindow):
         if self._store is None:
             return
         if page_id in self._inflight:
-            return  # 坑 2：同页并发请求只发一次
+            # 坑 2：同页并发请求只发一次；但本次重载请求不能丢——记一笔，
+            # 等在途 loader 收尾后补发（F1：真移动后推荐页必须重算）。
+            self._pending_reload.add(page_id)
+            return
         if isinstance(page, ZonePage):
             self._inflight.add(page_id)
             page.mark_loading()  # W18 U2：点击立即有可见反馈（「加载中…」+隐藏重试按钮）
@@ -339,39 +364,50 @@ class MainWindow(QMainWindow):
             return
         if error:
             page.mark_failed(error)
+        else:
+            page.apply_rank(out)
+            page.mark_loaded()
+        self._flush_pending_reload(page_id)
+
+    def _flush_pending_reload(self, page_id: str) -> None:
+        """在途 loader 收尾后补发被去重吞掉的重载请求（F1）。"""
+        if page_id not in self._pending_reload:
             return
-        page.apply_rank(out)
-        page.mark_loaded()
+        self._pending_reload.discard(page_id)
+        self._start_load(page_id)
 
     def _on_profile_loaded(self, page_id: str, data, error: str) -> None:
+        """画像 worker 完成 → UI 线程渲染；R1：收尾时补发被去重吞掉的重载请求。
+
+        与 _on_rank_loaded/_on_zone_loaded/_on_zone_failed 口径一致：无论成功、
+        失败还是页面类型不符，都必须清掉 _pending_reload 里的本页条目，否则
+        画像页在途时的第二次请求会被永久吞掉（pending 残留）。
+        """
         self._inflight.discard(page_id)
         self._loaders.pop(page_id, None)
         page = self._pages.get(page_id)
-        if not isinstance(page, ProfilePage):
-            return
-        if error:
-            page._summary.setText(f"画像加载失败（可重试）：{error}")
-            return
-        page.apply_profile(data)
-        page.loaded = True
+        if isinstance(page, ProfilePage):
+            if error:
+                page._summary.setText(f"画像加载失败（可重试）：{error}")
+            else:
+                page.apply_profile(data)
+                page.loaded = True
+        self._flush_pending_reload(page_id)
 
     def _start_recommend(self) -> None:
         """W16 F3：「开始推荐」→ RankLoader（W13 生产接线复用）+ 自动切推荐专区页。"""
         self._start_load("recommend")
         self._nav.setCurrentRow(2)
 
-    def _on_zone_changed(self, changed_page) -> None:
-        """W19 N2：真移动跨页联动——对侧专区页重查刷新（两表格同步，验收项）。"""
-        for pid in ("liked", "candidate"):
-            page = self._pages.get(pid)
-            if page is changed_page or not isinstance(page, ZonePage):
-                continue
-            try:
-                rows = zone_page_rows(self._store, pid)
-                _meta = zone_meta(self._store, pid)
-            except Exception:
-                continue  # 对侧刷新失败不掩盖发起页的成功状态
-            page.apply_rows(rows)
+    def _on_reader_zone_moved(self) -> None:
+        """#80：阅读页真移动完成 → liked/candidate 两页 + 推荐页重算（worker 内查库，§11.1）。
+
+        F1：推荐页也必须重算——移走的书不该继续留在推荐列表里（master 时代靠
+        RecommendPage._on_like_move_done → rank_candidates 重放抹掉，入口迁到
+        阅读界面后这条链路丢了，这里补齐）。
+        """
+        for pid in ("liked", "candidate", "recommend"):
+            self._start_load(pid)
 
     def _on_zone_loaded(self, page_id: str, rows) -> None:
         """worker 完成 → UI 线程渲染；「已加载」仅在成功后置位（坑 3）。"""
@@ -380,6 +416,7 @@ class MainWindow(QMainWindow):
         page = self._pages.get(page_id)
         if isinstance(page, ZonePage):
             page.apply_rows(rows)
+        self._flush_pending_reload(page_id)
 
     def _on_zone_failed(self, page_id: str, message: str) -> None:
         """worker 失败 → 清 in-flight、不置位、提示可重试（坑 3）。"""
@@ -388,6 +425,7 @@ class MainWindow(QMainWindow):
         page = self._pages.get(page_id)
         if isinstance(page, ZonePage):
             page.mark_failed(message)
+        self._flush_pending_reload(page_id)
 
     # —— N1：目录→库再扫描（手动「刷新」与定时自动扫描共用路径）——
     def _on_auto_scan(self) -> None:
@@ -567,7 +605,9 @@ class ProfilePage(QWidget):
 
 
 class RecommendPage(QWidget):
-    """推荐专区页：rank() 输出表格 + 三按钮（不合口味/标为喜欢/加入候选池）。
+    """推荐专区页：rank() 输出表格 + 「加入候选池」按钮。
+
+    #80：「不合口味」「标为喜欢」两个反馈入口已移到阅读界面（ReaderPage）。
 
     UI 线程只发起+渲染：写操作经 reco_ui.glue → Store 单写者队列；
     表格模型零排序（A6，rank 唯一入口的输出直接渲染）。
@@ -621,17 +661,11 @@ class RecommendPage(QWidget):
         self._empty.setWordWrap(True)
         self._empty.setVisible(False)
         layout.addWidget(self._empty)
+        # #80：「不合口味」「标为喜欢」已移到阅读界面；列表层只留「加入候选池」
         btns = QHBoxLayout()
-        self.btn_dislike = QPushButton("不合口味")
-        self.btn_like = QPushButton("标为喜欢")
         self.btn_pool = QPushButton("加入候选池")
-        self.btn_dislike.setObjectName("danger")
-        self.btn_like.setObjectName("primary")
-        for b in (self.btn_dislike, self.btn_like, self.btn_pool):
-            btns.addWidget(b)
+        btns.addWidget(self.btn_pool)
         layout.addLayout(btns)
-        self.btn_dislike.clicked.connect(lambda: self._feedback("dislike", "tag"))
-        self.btn_like.clicked.connect(lambda: self._feedback("like", "tag"))
         self.btn_pool.clicked.connect(lambda: self._feedback("add_to_pool", None))
         self._status = QLabel("")
         self._status.setObjectName("dim")
@@ -731,14 +765,14 @@ class RecommendPage(QWidget):
             return None
 
     def _feedback(self, kind: str, axis) -> None:
-        """发起反馈：写库投递线程池（UI 线程零阻塞，§11.1）；连点防护=反馈侧 in-flight 去重（坑 2）。"""
+        """发起反馈：写库投递线程池（UI 线程零阻塞，§11.1）；连点防护=反馈侧 in-flight 去重（坑 2）。
+
+        #80：列表层只剩「加入候选池」这一入口；dislike/like 改由阅读界面发起。
+        """
         if self._store is None:
             return
         raw = self._model.book_id_at(self.table.selectionModel().currentIndex().row())
         if raw is None:
-            return
-        if kind == "like":
-            self._move_liked(raw)  # W19 N2：like 升级真移动
             return
         # #72：rank 输出的书号命名空间是 "b<N>"，必须先剥离 b 前缀再转整数。
         # 修复前这里直接 int("b203") → ValueError，点击即崩（负样本入口全废）。
@@ -746,83 +780,16 @@ class RecommendPage(QWidget):
         if book_id is None:
             self._status.setText(f"反馈失败：书号无法解析（{raw}）")
             return
-        for b in (self.btn_dislike, self.btn_like, self.btn_pool):
-            b.setEnabled(False)  # in-flight：按钮禁用防双写
+        self.btn_pool.setEnabled(False)  # in-flight：按钮禁用防双写
         worker = FeedbackWorker(self._store, kind, book_id, axis=axis)
         worker.signals.done.connect(self._on_feedback_done)
         QThreadPool.globalInstance().start(worker)
 
-    def _move_liked(self, raw_book_id: str) -> None:
-        """W19 N2：「标为喜欢」→ 真移动（推荐源 → liked/；UI 只发起，§11.1）。
-
-        book_id 名空间不同（rank 输出 "b<N>"），先解析 db 内真实整数 book_id；
-        源行优先取 candidate 专区——rank 候选集只来自 candidate，推荐页点喜欢
-        就是把 candidate 那份真移动进 liked/。双区同书（liked+candidate 各一份）
-        若按 file_id 排序会命中已存在的 liked 行，被 move_book_to_liked 判为
-        幂等 no-op，candidate 副本永远不被移动（缺陷：能看到书但文件没进 liked/）。
-        无 candidate 行再回退任意专区现存行；file 行全缺失时回退书名→liked/ 同名
-        产物，产物不存在则诚实降级不移动（不猜名字映射）。已迁移书的重复点击由
-        move_book_to_liked 幂等护栏吸收（no-op 不落事件）。
-        """
-        from reco_ui.pages import ZONE_DIR_NAMES, LikeMoveWorker
-
-        digits = str(raw_book_id).lstrip("b")
-        try:
-            book_id = int(digits)
-        except ValueError:
-            return
-        conn = self._store.read_conn()
-        try:
-            row = conn.execute(
-                "SELECT path, zone FROM files WHERE book_id = ? AND present = 1"
-                " AND zone = 'candidate' LIMIT 1", (book_id,)).fetchone()
-            if row is None:
-                row = conn.execute(
-                    "SELECT path, zone FROM files WHERE book_id = ? AND present = 1"
-                    " ORDER BY file_id LIMIT 1", (book_id,)).fetchone()
-            if row is None:
-                like_row = conn.execute(
-                    "SELECT display_name FROM books WHERE book_id = ?", (book_id,)).fetchone()
-            if row is None:
-                like_row = conn.execute(
-                    "SELECT display_name FROM books WHERE book_id = ?", (book_id,)).fetchone()
-        finally:
-            conn.close()
-        if row is None:
-            if like_row is None:
-                return
-            # 回退探测只查路径，不建目录（无源文件绝不留下移动目录痕迹）
-            src = Path(self._data_root) / ZONE_DIR_NAMES["liked"] / like_row[0]
-            if not src.is_file():
-                return
-            row = (str(src), "liked")
-        worker = LikeMoveWorker(self._store, str(row[1]), str(self._data_root),
-                                src_path=str(row[0]))
-        worker.signals.done.connect(self._on_like_move_done)
-        QThreadPool.globalInstance().start(worker)
-
-    def _on_like_move_done(self, ok: bool, rows: list, error: str) -> None:
-        """真移动完成：成功重放 rank 输出（移出的书从候选集消失）；失败报错可重试。
-
-        rows 为 worker 回传的重查结果（行重查在 worker 线程，§11.1）；推荐页
-        只用 rank 重放渲染，故忽略 rows。
-        """
-        if not ok:
-            self._status.setText(f"移动失败（可重试）：{error}")
-            return
-        try:
-            from reco_store.recommend import rank_candidates
-
-            out = rank_candidates(self._store)
-        except Exception as exc:
-            self._status.setText(f"已移到喜欢专区（重算推荐失败：{type(exc).__name__}: {exc}）")
-            return
-        self.apply_rank(out)
-        self._status.setText("已记录")
+    #80：「标为喜欢」真移动已迁到阅读界面（ReaderPage + ReaderLikeMoveWorker），
+    # 源查询口径（优先 candidate 行）随之迁移；此处不再保留列表层移动逻辑。
 
     def _on_feedback_done(self, event_id: int, error: str) -> None:
-        for b in (self.btn_dislike, self.btn_like, self.btn_pool):
-            b.setEnabled(True)
+        self.btn_pool.setEnabled(True)
         self._status.setText("已记录" if not error else f"反馈失败（可重试）：{error}")
 
 

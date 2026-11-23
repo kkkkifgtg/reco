@@ -39,7 +39,8 @@ from reco_ui.qt import (
 )
 from reco_ui.reader import ReaderError, chunk_text, load_book_text, parse_epub_spine
 
-__all__ = ["ReaderLoadSignals", "ReaderLoadWorker", "ReaderPage"]
+__all__ = ["ReaderLoadSignals", "ReaderLoadWorker", "ReaderPage",
+           "ReaderLikeMoveSignals", "ReaderLikeMoveWorker"]
 
 _SAVE_DELAY_MS = 1000  # 滚动停止 1s 后落进度（票面口径）
 _APPEND_THRESHOLD_PX = 200  # 距底部小于该像素即预取下一块
@@ -47,6 +48,7 @@ _APPEND_THRESHOLD_PX = 200  # 距底部小于该像素即预取下一块
 # 运行中/排队中的 worker 持活注册表：QThreadPool 不持 Python 包装引用，
 # 窗口被 GC 后排队 worker 的包装会悬垂（pages.py 同款生命周期纪律）。
 _ACTIVE_READERS: set = set()
+_ACTIVE_READER_MOVES: set = set()  # #80：阅读页「标为喜欢」真移动 worker 持活
 
 
 class ReaderLoadSignals(QObject):
@@ -118,14 +120,101 @@ class ReaderLoadWorker(QRunnable):
             _ACTIVE_READERS.discard(self)
 
 
+class ReaderLikeMoveSignals(QObject):
+    """阅读页「标为喜欢」完成信号：(ok, moved, error)。
+
+    ok=False → 失败（error 非空）；ok=True 且 moved=True → 真移动落位；
+    ok=True 且 moved=False → 幂等 no-op（书已在喜欢专区，无位移无事件）。
+    """
+
+    done = pyqtSignal(bool, bool, str)
+
+
+class ReaderLikeMoveWorker(QRunnable):
+    """#80：阅读页「标为喜欢」真移动 worker（池线程：查源+移动+落库，§11.1）。
+
+    源查询优先取 zone='candidate' 的 files 行（PR #78 口径）：同一本书在
+    liked/ 与 candidate/ 各有一份时，移动的是 candidate 那份，否则会被
+    move_book_to_liked 判为幂等 no-op，文件永远不进 liked/。无 candidate 行
+    再回退任意现存专区行；都没有则诚实降级（不移动、不落事件）。
+    """
+
+    def __init__(self, store, book_id: int, data_root: str) -> None:
+        super().__init__()
+        self._store = store
+        self._book_id = int(book_id)
+        self._data_root = str(data_root)
+        self.signals = ReaderLikeMoveSignals()
+        _ACTIVE_READER_MOVES.add(self)
+
+    def run(self) -> None:
+        from pathlib import Path
+
+        from reco_ui.pages import move_book_to_liked
+
+        # F3：data_root 未注入时绝不移动——move_book_to_liked 会以 CWD 为根
+        # 凭空建 liked/ 目录（用户可见的副作用），此处提前诚实降级。
+        if not self._data_root:
+            self._emit(False, False, "未配置数据目录，无法移动到喜欢专区")
+            return
+        try:
+            row = self._lookup_source()
+            if row is None:
+                self._emit(False, False, "本机已找不到这本书的文件")
+                return
+            src_path, zone = row
+            dst = move_book_to_liked(self._store, src_path, self._data_root,
+                                     from_zone=zone, book_id=self._book_id)
+        except Exception as exc:  # UI 只收字符串
+            self._emit(False, False, f"{type(exc).__name__}: {exc}")
+            return
+        # F2：move_book_to_liked 返回原路径 = 幂等 no-op（已在喜欢专区/源已移走），
+        # 此时不能谎称「已移到喜欢专区」。
+        moved = Path(str(dst)) != Path(src_path)
+        self._emit(True, moved, "")
+
+    def _lookup_source(self):
+        """(path, zone) 候选源；优先 candidate 行，其次任意现存专区行。"""
+        conn = self._store.read_conn()
+        try:
+            row = conn.execute(
+                "SELECT path, zone FROM files WHERE book_id = ? AND present = 1"
+                " AND zone = 'candidate' LIMIT 1", (self._book_id,)).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT path, zone FROM files WHERE book_id = ? AND present = 1"
+                    " ORDER BY file_id LIMIT 1", (self._book_id,)).fetchone()
+        finally:
+            conn.close()
+        return (str(row[0]), str(row[1])) if row is not None else None
+
+    def _emit(self, ok: bool, moved: bool, error: str) -> None:
+        try:
+            self.signals.done.emit(ok, moved, error)
+        except RuntimeError:
+            pass  # 接收方已销毁
+        finally:
+            _ACTIVE_READER_MOVES.discard(self)
+
+
 class ReaderPage(QWidget):
-    """阅读页：书名+percent 标题、只读正文区、状态行、返回按钮（同一实例换书）。"""
+    """阅读页：书名+percent 标题、只读正文区、状态行、返回按钮（同一实例换书）。
+
+    #80：「标为喜欢」「不合口味」两个反馈入口只在本页出现；从「我喜欢」专区
+    （liked）进入阅读时不显示（来源专区由 open_book 的 from_zone 传入）。
+    """
 
     back_requested = pyqtSignal()
+    zone_moved = pyqtSignal()  # #80：「标为喜欢」真移动完成 → 主窗刷新专区页
 
-    def __init__(self, store=None, parent: QWidget | None = None) -> None:
+    def __init__(self, store=None, parent: QWidget | None = None, *,
+                 data_root=None) -> None:
         super().__init__(parent)
         self._store = store
+        self._data_root = data_root  # 「标为喜欢」真移动的目标根目录（liked/）
+        # #80：反馈按钮默认隐藏；open_book 按来源专区重算（从「我喜欢」进阅读不显示）
+        self._feedback_visible = False
+        self._feedback_inflight = False
         self._book_id: int | None = None
         self._path: str | None = None
         self._format = "text"
@@ -163,11 +252,22 @@ class ReaderPage(QWidget):
         self._btn_next.clicked.connect(self.next_chapter)
         self._back = QPushButton("返回")
         self._back.clicked.connect(self._on_back)
+        # #80：「标为喜欢」「不合口味」只出现在阅读界面（列表层入口已移除）
+        self._btn_like = QPushButton("标为喜欢")
+        self._btn_like.setObjectName("primary")
+        self._btn_like.clicked.connect(self._on_like_clicked)
+        self._btn_dislike = QPushButton("不合口味")
+        self._btn_dislike.setObjectName("danger")
+        self._btn_dislike.clicked.connect(self._on_dislike_clicked)
+        self._btn_like.setVisible(False)
+        self._btn_dislike.setVisible(False)
         nav = QHBoxLayout()
         nav.addWidget(self._back)
         nav.addStretch(1)
         nav.addWidget(self._btn_prev)
         nav.addWidget(self._btn_next)
+        nav.addWidget(self._btn_like)
+        nav.addWidget(self._btn_dislike)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.addWidget(self._title)
@@ -201,9 +301,24 @@ class ReaderPage(QWidget):
     def loaded(self) -> bool:
         return self._loaded
 
+    @property
+    def like_button(self) -> QPushButton:
+        """「标为喜欢」按钮（测试/验收读取面；#80）。"""
+        return self._btn_like
+
+    @property
+    def dislike_button(self) -> QPushButton:
+        """「不合口味」按钮（测试/验收读取面；#80）。"""
+        return self._btn_dislike
+
     # ---------------------------------------------------------- 打开/关闭
-    def open_book(self, path, book_id) -> None:
-        """打开一本书；若上一本已加载则先 flush 其进度。"""
+    def open_book(self, path, book_id, *, from_zone=None) -> None:
+        """打开一本书；若上一本已加载则先 flush 其进度。
+
+        from_zone = 来源专区（"liked"/"candidate"/"recommend"）。#80：每次换书
+        都要重算反馈按钮显隐——从「我喜欢」专区（liked）进入阅读不显示这两个按钮。
+        """
+        self.set_feedback_visible(from_zone != "liked")
         if self._loaded:
             self.flush_progress()
         self._close_first_frame()
@@ -261,6 +376,7 @@ class ReaderPage(QWidget):
         self._update_chapter_buttons()
         self._title.clear()
         self._status.clear()
+        self.set_feedback_visible(False)  # 离开阅读即收起反馈入口
 
     def _on_back(self) -> None:
         self.flush_progress()
@@ -449,6 +565,67 @@ class ReaderPage(QWidget):
         if self._save_timer.isActive():
             self._save_timer.stop()
         self._save_progress()
+
+    # ---------------------------------------------------------- 反馈入口（#80）
+    def set_feedback_visible(self, visible: bool) -> None:
+        """显示/隐藏两个反馈按钮（来源专区判定结果；换书时重算）。"""
+        self._feedback_visible = bool(visible)
+        self._btn_like.setVisible(self._feedback_visible)
+        self._btn_dislike.setVisible(self._feedback_visible)
+
+    def feedback_visible(self) -> bool:
+        """反馈按钮当前是否可见（测试/验收读取面）。"""
+        return self._feedback_visible
+
+    def _on_like_clicked(self) -> None:
+        """「标为喜欢」：真移动进 liked/（池线程；UI 线程零 DB 零阻塞，§11.1）。"""
+        if self._store is None or self._book_id is None or self._feedback_inflight:
+            return
+        # F3：data_root 未注入 → 诚实降级（不移动、不在 CWD 建目录）
+        if not self._data_root:
+            self._status.setText("未配置数据目录，无法移动到喜欢专区")
+            return
+        self._set_feedback_buttons_enabled(False)
+        worker = ReaderLikeMoveWorker(self._store, self._book_id,
+                                      str(self._data_root))
+        worker.signals.done.connect(self._on_like_move_done)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_like_move_done(self, ok: bool, moved: bool, error: str) -> None:
+        self._set_feedback_buttons_enabled(True)
+        if not ok:
+            self._status.setText(f"移动失败（可重试）：{error}")
+            return
+        if not moved:
+            # F2：幂等 no-op（书已在喜欢专区）——不谎称已移动
+            self._status.setText("这本已在喜欢专区，无需重复移动")
+            return
+        self._status.setText("已移到喜欢专区")
+        try:
+            self.zone_moved.emit()
+        except RuntimeError:
+            pass  # 接收方已销毁
+
+    def _on_dislike_clicked(self) -> None:
+        """「不合口味」：写库（rec_feedback + 静音窗口）在池线程（§11.1）。"""
+        if self._store is None or self._book_id is None or self._feedback_inflight:
+            return
+        self._set_feedback_buttons_enabled(False)
+        from reco_ui.pages import FeedbackWorker
+
+        worker = FeedbackWorker(self._store, "dislike", self._book_id, axis="tag")
+        worker.signals.done.connect(self._on_dislike_done)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_dislike_done(self, event_id: int, error: str) -> None:
+        self._set_feedback_buttons_enabled(True)
+        self._status.setText("已记录" if not error else f"反馈失败（可重试）：{error}")
+
+    def _set_feedback_buttons_enabled(self, enabled: bool) -> None:
+        """in-flight 期间禁用两按钮，防双写（连点防护）。"""
+        self._feedback_inflight = not enabled
+        self._btn_like.setEnabled(enabled)
+        self._btn_dislike.setEnabled(enabled)
 
     def _update_title(self, percent: float | None = None) -> None:
         if self._path is None:
