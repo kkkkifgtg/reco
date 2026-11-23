@@ -38,17 +38,21 @@ from reco_ui.qt import (
     pyqtSignal,
 )
 from reco_ui.reader import ReaderError, chunk_text, load_book_text, parse_epub_spine
+from reco_ui.reader_signals import SIGNAL_SOURCE, ReadingSession
 
 __all__ = ["ReaderLoadSignals", "ReaderLoadWorker", "ReaderPage",
-           "ReaderLikeMoveSignals", "ReaderLikeMoveWorker"]
+           "ReaderLikeMoveSignals", "ReaderLikeMoveWorker",
+           "ReaderSignalSignals", "ReaderSignalWorker"]
 
 _SAVE_DELAY_MS = 1000  # 滚动停止 1s 后落进度（票面口径）
 _APPEND_THRESHOLD_PX = 200  # 距底部小于该像素即预取下一块
+_SIGNAL_FP = "gui/reader/1"  # #73：行为信号落库口径（与反馈/扫描前缀分流）
 
 # 运行中/排队中的 worker 持活注册表：QThreadPool 不持 Python 包装引用，
 # 窗口被 GC 后排队 worker 的包装会悬垂（pages.py 同款生命周期纪律）。
 _ACTIVE_READERS: set = set()
 _ACTIVE_READER_MOVES: set = set()  # #80：阅读页「标为喜欢」真移动 worker 持活
+_ACTIVE_SIGNALS: set = set()  # #73：行为信号落库 worker 持活
 
 
 class ReaderLoadSignals(QObject):
@@ -197,6 +201,61 @@ class ReaderLikeMoveWorker(QRunnable):
             _ACTIVE_READER_MOVES.discard(self)
 
 
+class ReaderSignalSignals(QObject):
+    """信号落库 worker 信号：done(写入条数, error)；error 非空 = 失败。"""
+
+    done = pyqtSignal(int, str)
+
+
+class ReaderSignalWorker(QRunnable):
+    """#73：阅读行为信号落库 worker（池线程 append_event，§11.1 UI 线程零 DB）。
+
+    只走事件流唯一写路径（signal_recorded → signals 投影），载荷限白名单
+    {kind, value, source, session_id}——路径/设备信息绝不进信号表（匿名纪律）。
+    失败只静默丢弃（信号是尽力采集，绝不打断阅读），error 供测试与诊断读取。
+    """
+
+    def __init__(self, store, book_id: int, records, *, session_id: str) -> None:
+        super().__init__()
+        self._store = store
+        self._book_id = int(book_id)
+        self._records = list(records or ())
+        self._session_id = str(session_id)
+        self.signals = ReaderSignalSignals()
+        _ACTIVE_SIGNALS.add(self)  # 入队即持活（QThreadPool 不持 Python 包装）
+
+    def run(self) -> None:
+        written = 0
+        try:
+            at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            for rec in self._records:
+                self._store.append_event(
+                    "signal_recorded",
+                    book_id=self._book_id,
+                    payload={
+                        "kind": str(rec["kind"]),
+                        "value": float(rec["value"]),
+                        "source": SIGNAL_SOURCE,
+                        "session_id": self._session_id,
+                    },
+                    occurred_at=at,
+                    config_fingerprint=_SIGNAL_FP,
+                    actor="user",
+                )
+                written += 1
+            self._emit(written, "")
+        except Exception as exc:  # 信号采集尽力而为，UI 只收字符串
+            self._emit(written, f"{type(exc).__name__}: {exc}")
+
+    def _emit(self, written: int, error: str) -> None:
+        try:
+            self.signals.done.emit(int(written), error)
+        except RuntimeError:
+            pass  # 接收方已销毁
+        finally:
+            _ACTIVE_SIGNALS.discard(self)
+
+
 class ReaderPage(QWidget):
     """阅读页：书名+percent 标题、只读正文区、状态行、返回按钮（同一实例换书）。
 
@@ -215,6 +274,8 @@ class ReaderPage(QWidget):
         # #80：反馈按钮默认隐藏；open_book 按来源专区重算（从「我喜欢」进阅读不显示）
         self._feedback_visible = False
         self._feedback_inflight = False
+        # #73：当前阅读会话（打开成功建、关闭/换书结算），None = 无在途会话
+        self._signal_session: ReadingSession | None = None
         self._book_id: int | None = None
         self._path: str | None = None
         self._format = "text"
@@ -321,6 +382,7 @@ class ReaderPage(QWidget):
         self.set_feedback_visible(from_zone != "liked")
         if self._loaded:
             self.flush_progress()
+        self._flush_reading_signals()  # #73：换书即结算上一本的 dwell/read_time
         self._close_first_frame()
         self._token += 1
         token = self._token
@@ -354,8 +416,9 @@ class ReaderPage(QWidget):
         QThreadPool.globalInstance().start(worker)
 
     def close_book(self) -> None:
-        """关闭当前书：flush 进度、丢弃在途加载结果、清空视图。"""
+        """关闭当前书：flush 进度、结算行为信号、丢弃在途加载结果、清空视图。"""
         self.flush_progress()
+        self._flush_reading_signals()  # #73：关闭 → dwell/read_time
         self._save_timer.stop()
         self._token += 1
         self._close_first_frame()
@@ -380,6 +443,7 @@ class ReaderPage(QWidget):
 
     def _on_back(self) -> None:
         self.flush_progress()
+        self._flush_reading_signals()  # #73：返回即结算（再次进入是新会话）
         self.back_requested.emit()
 
     # ---------------------------------------------------------- 加载回调 / 首帧
@@ -404,6 +468,7 @@ class ReaderPage(QWidget):
             self._install_first_frame(payload.get("progress"))
         self._loaded = True
         self._status.setText("")
+        self._start_reading_signals()  # #73：开始阅读 → reopen
 
     def _install_first_frame(self, progress) -> None:
         """只装 chunk[0] 即完成首帧；续读时把覆盖目标偏移的块全部装入后再定位光标。"""
@@ -442,6 +507,8 @@ class ReaderPage(QWidget):
     def _on_scroll(self, _value: int) -> None:
         if not self._loaded:
             return
+        if self._signal_session is not None:
+            self._signal_session.note_activity()  # #73：滚动 = 在读（只记内存）
         self._save_timer.start()  # 滚动重启 1s 节流
         if self._format == "epub":
             self._pending_block_pos = None  # 用户已自行滚动，别在 show 时回设旧位置
@@ -519,6 +586,8 @@ class ReaderPage(QWidget):
         self._render_chapter(index, 0)
         self._update_chapter_buttons()
         self._update_title()
+        if self._signal_session is not None:
+            self._signal_session.note_activity()  # #73：翻章 = 在读（只记内存）
         if self._loaded:
             self._save_progress()  # 翻章即落盘（票面：翻页/关窗时保存）
 
@@ -543,6 +612,7 @@ class ReaderPage(QWidget):
             return
         offset = self._viewer.textCursor().position()
         percent = self._percent_for(offset)
+        self._maybe_note_completion(percent)  # #73：读到末尾 → completion
         fields = {
             "percent": percent,
             "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -565,6 +635,38 @@ class ReaderPage(QWidget):
         if self._save_timer.isActive():
             self._save_timer.stop()
         self._save_progress()
+
+    # ---------------------------------------------------------- 行为信号（#73）
+    def _start_reading_signals(self) -> None:
+        """打开成功即开始会话：记一条 reopen（落库在池线程）。"""
+        session = ReadingSession()
+        self._signal_session = session
+        self._emit_reader_signals([{"kind": "reopen", "value": 1.0}], session)
+
+    def _flush_reading_signals(self) -> None:
+        """结算当前会话 → dwell/read_time（每会话各一条，绝不逐秒写）。"""
+        session, self._signal_session = self._signal_session, None
+        if session is None:
+            return
+        self._emit_reader_signals(session.settle(), session)
+
+    def _maybe_note_completion(self, percent: float) -> None:
+        """读到末尾（>=95%）即写一条 completion；本会话只写一次。"""
+        session = self._signal_session
+        if session is None or not session.note_percent(percent):
+            return
+        self._emit_reader_signals(
+            [{"kind": "completion", "value": float(percent)}], session)
+
+    def _emit_reader_signals(self, records, session: ReadingSession) -> None:
+        """交给池线程 worker 落库（§11.1：UI 线程零 DB 零阻塞）。"""
+        if not records or session is None:
+            return
+        if self._store is None or self._book_id is None:
+            return
+        worker = ReaderSignalWorker(self._store, self._book_id, records,
+                                    session_id=session.session_id)
+        QThreadPool.globalInstance().start(worker)
 
     # ---------------------------------------------------------- 反馈入口（#80）
     def set_feedback_visible(self, visible: bool) -> None:
