@@ -44,21 +44,22 @@ def _stats(counts) -> SimpleNamespace:
 
 # ---------------------------------------------------------------- ①联动刷新链路
 
-def test_zone_scope_constant_only_liked():
-    assert AutoTagOutcome.ZONES == ("liked",)
+def test_zone_scope_constants():
+    assert AutoTagOutcome.ZONES == ("liked", "candidate")  # #83：candidate 也打标
 
 
 def test_liked_book_with_known_alias_writes_book_tags_source_auto():
-    """合成书带已知 alias（洗脑→mech.hypnosis）→ 命中写 book_tags(source=auto)。
+    """合成书带已知 alias 与值行显示名 → 各自命中写 book_tags(source=auto)。
 
-    种子语义：mech.hypnosis 的 alias=（精神控制/洗脑/mind control）；「催眠」是值
-    的显示名（label），不是 alias → 不命中（Q11 只认 alias 精确命中）。
+    种子语义：mech.hypnosis 的 alias=（精神控制/洗脑/mind control）；#83 起值行
+    显示名也参与匹配：「催眠」→ mech.催眠 同样命中。
     """
     store = _seeded()
     outcome = auto_tag_book(
         store, book_id=7, zone="liked", stats=_stats({"洗脑": 3, "催眠": 1}),
         now="2026-11-21T00:00:00",
     )
+    # 洗脑（alias）与催眠（#83 显示名）都解析到 mech.hypnosis → 同标签合并一个命中
     assert outcome.inserted == ("mech.hypnosis",)
     assert outcome.updated == ()
     assert outcome.skipped_manual == ()
@@ -67,8 +68,9 @@ def test_liked_book_with_known_alias_writes_book_tags_source_auto():
     assert all(r.source == "auto" for r in rows)
     assert all(r.confidence == 1.0 for r in rows)
     basis = json.loads(next(r for r in rows if r.tag_id == "mech.hypnosis").basis_json)
-    assert basis["total"] == 3  # 手算：洗脑×3 → total 3
+    assert basis["total"] == 4  # 手算：洗脑×3 + 催眠×1 → total 4
     assert basis["axis"] == "mechanism"
+    assert {m["alias"] for m in basis["matches"]} == {"洗脑", "催眠"}
     assert all(e["kind"] == "alias_exact" for e in basis["evidence"])
 
 
@@ -97,19 +99,21 @@ def test_manual_row_never_overwritten_by_auto():
 
 
 def test_aliased_for_match_returns_active_aliases_only():
-    """match 词表 = active 标签的 tag_id+aliases（label 不参与；archived 不参与）。"""
+    """match 词表 = active 标签的 tag_id+aliases+值行显示名（#83；archived 不参与）。"""
     store = _seeded()
     aliases = aliases_for_match(store)
-    # 身份键 = tag_id 本身 + aliases（label 不参与——改 label 不影响历史）
+    # 身份/匹配键 = tag_id + aliases + 值行显示名（match_keys；#83）
     assert "洗脑" in aliases and "精神控制" in aliases and "mind control" in aliases
     assert "mech.hypnosis" in aliases   # tag_id 本身参与
     assert "top.1v1" in aliases          # 值行 tag_id 参与精确命中
-    assert "催眠" not in aliases          # 值显示名是 label，不是 alias → 不参与
-    # archived 标签的 alias 不再参与（D3）
+    assert "催眠" in aliases              # #83：值行显示名参与匹配词表
+    assert "攻" not in aliases and "HE" not in aliases  # 单字/ASCII 显示名不参与
+    # archived 标签自身的键不再参与（D3）；同形词经各自存活值标签仍在（#83）
     from reco_labels import archive_tag
     archive_tag(store, "mech.hypnosis", now="2026-11-21T02:00:00")
     aliases2 = aliases_for_match(store)
-    assert "洗脑" not in aliases2
+    assert "mech.hypnosis" not in aliases2 and "mind control" not in aliases2
+    assert "洗脑" in aliases2 and "精神控制" in aliases2  # mech.洗脑 / mech.精神控制 的显示名
 
 
 # ---------------------------------------------------------------- ②双层边界
@@ -151,14 +155,19 @@ def test_proposal_dedupes_across_runs():
     assert len([r for r in store.iter_proposals() if r.status == "pending"]) == 1
 
 
-def test_candidate_zone_rejected_zero_writes():
-    """candidate 不触发（ValueError 拒绝）：零写入、零提议（未读不污染画像）。"""
+def test_candidate_zone_tags_but_profile_folding_is_caller_side():
+    """#83：candidate 也自动打标（book_tags(source=auto) + 提案）。
+
+    画像折叠（tag_hit 事件）由调用方裁定——本层只落标注，不落 tag_hit。
+    """
     store = _seeded()
-    with pytest.raises(ValueError):
-        auto_tag_book(store, 10, "candidate", _stats({"洗脑": 9, "摄心术": 9}),
-                      now="2026-11-21T00:00:00")
-    assert not list(store.iter_book_tags())
-    assert not [r for r in store.iter_proposals() if r.status == "pending"]
+    outcome = auto_tag_book(store, 10, "candidate", _stats({"洗脑": 9, "摄心术": 9}),
+                            now="2026-11-21T00:00:00")
+    assert set(outcome.inserted) == {"mech.hypnosis"}
+    assert outcome.proposed == ("摄心术",)
+    rows = [r for r in store.iter_book_tags() if r.book_id == 10]
+    assert {r.tag_id for r in rows} == {"mech.hypnosis"}
+    assert "tag_hit" not in [e.kind for e in store.iter_events()]  # 画像折叠不在本层
 
 
 def test_recommend_zone_rejected():

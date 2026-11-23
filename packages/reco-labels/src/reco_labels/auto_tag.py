@@ -1,14 +1,16 @@
 """liked 专区自动打标签（RR2/t3）——match_tags 真数据接线的编排层。
 
 边界与裁定（G2r 审计基线 §L1-L7；工单 RR2/t3 验收口径）：
-- 只对 zone=liked 触发（AutoTagOutcome.ZONES）：candidate/推荐专区不自动打标、
-  不提议——candidate 未读未确认，若自动打标会把「未确认偏好」混进画像正样本
-  （tag_hit 折叠进 axis_weights），污染轴权重与推荐依据，因此 ValueError 拒绝（零写入）。
+- 触发专区（AutoTagOutcome.ZONES）= liked + candidate（#83 报告人裁定：candidate
+  1529 本也要打标）。画像防污染边界不变：tag_hit 画像事件只对 liked 落（candidate
+  的 book_tags 仅供展示与人工确认，不折叠进 axis_weights），折叠与否由调用方裁定；
+  推荐专区等其他 zone 仍 ValueError 拒绝（零写入）。
 - 双层（工单 RR2 ②）：已存在标签（taxonomy alias 命中）→ record_tag_hits 直写
   book_tags(source=auto)（D1+F2 双保护继承：manual/user 行在写入层拒绝覆盖）；
   未知词不自动建 tags 行 → propose_tags 进 proposals(pending) 待用户显式确认
   （accept_proposal 才建 user 标签，工单 06 语义）。
-- 识别只靠「域→轴→值」taxonomy + aliases 命中（§L：不从正文推断新标签值）。
+- 识别只靠「域→轴→值」taxonomy + aliases + 值行显示名命中（§L 不从正文推断新
+  标签值；#83 起显示名参与，谐音/形近变体走 alias 提案，仍不自动建标签）。
 - B 类安全：事件/提议 payload 只含别名/计数/阈值/标签 id/zone/book_id——零正文；
   basis 由 match_tags 构造（只含别名/计数/裁定证据，绝无正文片段）。
 - W4 接缝（stats.alias_counts 鸭子协议）：extract_features(extract_statistics) 的
@@ -25,7 +27,8 @@ from datetime import datetime, timezone
 from typing import Iterable, Mapping
 
 from reco_labels.match import TagHit, match_tags
-from reco_labels.proposals import propose_tags
+from reco_labels.taxonomy import match_keys
+from reco_labels.proposals import propose_alias_tags, propose_tags, variant_alias_candidates
 from reco_labels.record import RecordResult, record_tag_hits
 from reco_labels.store import BookTagRow, LabelsStore, ProposalRow, TagRow
 
@@ -333,7 +336,7 @@ class AutoTagOutcome:
     （skipped=True），不写 book_tags、不产提议。
     """
 
-    ZONES = ("liked",)  # 触发专区白名单：只有 liked（已确认喜欢）自动打标
+    ZONES = ("liked", "candidate")  # 触发专区白名单（#83：candidate 也打标；画像折叠仅 liked）
 
     book_id: int
     zone: str
@@ -341,6 +344,7 @@ class AutoTagOutcome:
     hits: tuple[TagHit, ...]
     record: RecordResult
     proposed: tuple[str, ...]  # 新词提案（proposals pending，待用户确认）
+    proposed_aliases: tuple[str, ...] = ()  # #83：谐音/形近变体的别名提案（挂原标签）
 
     @property
     def inserted(self) -> tuple:
@@ -356,15 +360,16 @@ class AutoTagOutcome:
 
 
 def aliases_for_match(store: LabelsStore) -> tuple[str, ...]:
-    """自动识别词表：active 标签的 tag_id + aliases（label 不参与，archived 不参与）。
+    """自动识别词表：active 标签的 tag_id + aliases + 值行显示名（archived 不参与）。
 
-    与 load_taxonomy 的身份键完全一致（taxonomy.py：tag_id 本身 + 全部 alias）。
+    与 load_taxonomy 的身份键完全一致（taxonomy.match_keys；#83 起值行显示名参与，
+    单字/纯 ASCII 显示名仍不参与——子串探针精度护栏）。
     """
     return tuple(
         key
         for row in store.iter_tags()
         if row.status == "active"
-        for key in (row.tag_id, *row.aliases)
+        for key in match_keys(row)
         if str(key).strip()
     )
 
@@ -401,9 +406,10 @@ def auto_tag_book(
     now: str,
     propose_threshold: int = TAG_PROPOSE_THRESHOLD,
 ) -> AutoTagOutcome:
-    """单本 liked 书的自动打标编排：match → record(auto) → propose(新词)。
+    """单本 liked/candidate 书的自动打标编排：match → record(auto) → propose(新词)。
 
-    - zone 不在 ZONES：ValueError 拒绝（candidate/推荐专区不触发——未读不污染画像）；
+    - zone 不在 ZONES：ValueError 拒绝（推荐专区等不触发）；
+      画像折叠（tag_hit）只应对 liked 落——candidate 的标注不进画像正样本；
     - taxonomy alias 命中 → record_tag_hits 落 book_tags(source=auto)
       （manual/user 由写入层 ManualTagProtected 拒绝 → skipped_manual）；
     - 未知正计数词 → propose_tags 进 proposals(pending)，tags 表零改动。
@@ -419,18 +425,29 @@ def auto_tag_book(
     unknown = _unknown_counts(store, hits, stats)
     record = record_tag_hits(store, book_id, hits, now=now)
     proposed: tuple[str, ...] = ()
+    proposed_aliases: tuple[str, ...] = ()
     if unknown:
-        proposals = propose_tags(
-            store, unknown, threshold=propose_threshold, now=now,
-        )
-        proposed = tuple(p.candidate for p in proposals)
-    skipped = not hits and not proposed
+        # #83：与既有值标签显示名仅差一字的谐音/形近变体 → alias 提案（挂原标签，
+        # 不拆碎分类）；其余未知词仍走新词提案（双层边界不变）。
+        variants = variant_alias_candidates(unknown, taxonomy)
+        rest = {w: c for w, c in unknown.items() if w not in variants}
+        if variants:
+            alias_props = propose_alias_tags(
+                store, variants, threshold=propose_threshold, now=now,
+            )
+            proposed_aliases = tuple(p.candidate for p in alias_props)
+        if rest:
+            proposals = propose_tags(
+                store, rest, threshold=propose_threshold, now=now,
+            )
+            proposed = tuple(p.candidate for p in proposals)
+    skipped = not hits and not proposed and not proposed_aliases
     # 关系图：有标签命中才提取并落库（无标签不造假图）
     if hits:
         _persist_relation_graph(store, book_id, stats, hits, now=now)
     return AutoTagOutcome(
         book_id=book_id, zone=zone, skipped=skipped, hits=hits,
-        record=record, proposed=proposed,
+        record=record, proposed=proposed, proposed_aliases=proposed_aliases,
     )
 
 

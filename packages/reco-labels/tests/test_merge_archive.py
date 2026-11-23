@@ -120,8 +120,13 @@ def test_archive_keeps_rows_and_stops_matching():
     from reco_labels import load_taxonomy, match_tags, normalize_tag
 
     taxonomy = load_taxonomy(store)
-    assert normalize_tag("洗脑", taxonomy) is None          # 不参与识别
-    assert match_tags(_s({"洗脑": 2}), taxonomy) == ()      # 不参与打分输入
+    # 归档标签自身不再解析；#83 起同形词改经各自存活的值标签命中
+    assert normalize_tag("mech.hypnosis", taxonomy) is None
+    assert normalize_tag("mind control", taxonomy) is None  # 归档标签专属别名失效
+    assert normalize_tag("洗脑", taxonomy) == "mech.洗脑"
+    assert normalize_tag("精神控制", taxonomy) == "mech.精神控制"
+    hits = match_tags(_s({"洗脑": 2}), taxonomy)
+    assert [h.tag_id for h in hits] == ["mech.洗脑"]
     events = [e for e in store.iter_events() if e.kind == "tag_archived"]
     assert len(events) == 1 and events[0].payload["tag_id"] == "mech.hypnosis"
 

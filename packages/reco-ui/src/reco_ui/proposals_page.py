@@ -2,7 +2,7 @@
 
 设计要点：
 - 只读 pending；candidate/count 来自 proposal payload（proposals 表无 candidate 列）；
-- 采纳 → accept_proposal（建 user 标签，无 alias 暂不自动识别）；
+- 采纳 → accept_proposal（建 user 标签；#83 起显示名参与自动识别）；
 - 拒绝 → reject_proposal（不建标签）；
 - 库写与列表重查都在池线程 worker 内完成，UI 线程只渲染（§11.1）；
 - 无提案时诚实提示「暂无待确认提案」，不显示空表冒充有数据。

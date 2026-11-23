@@ -69,7 +69,8 @@ def test_accept_proposal_creates_user_tag():
     assert next(r for r in store.iter_tags() if r.tag_id == tag.tag_id) is not None
     from reco_labels import load_taxonomy, normalize_tag
 
-    assert normalize_tag("摄心术", load_taxonomy(store)) is None  # 无 alias 不识别
+    # #83：值行显示名参与识别——采纳即自动可识别（别名仍可后补扩展）
+    assert normalize_tag("摄心术", load_taxonomy(store)) == tag.tag_id
 
 
 def test_accept_proposal_without_pending_raises():

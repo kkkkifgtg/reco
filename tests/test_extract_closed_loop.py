@@ -79,7 +79,8 @@ def test_cli_extract_then_rank_rows_nonempty(tmp_path, capsys):
 
     assert main(["extract", "--db", str(db)]) == 0
     summary = json.loads(capsys.readouterr().out)
-    assert summary == {"total": 2, "ok": 2, "failed": 0, "vectors": 2}
+    assert summary == {"total": 2, "ok": 2, "failed": 0, "vectors": 2,
+                       "tagged": 0, "proposals": 0}
 
     store = open_store(db)
     try:
