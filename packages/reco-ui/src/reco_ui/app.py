@@ -367,16 +367,22 @@ class MainWindow(QMainWindow):
         self._start_load(page_id)
 
     def _on_profile_loaded(self, page_id: str, data, error: str) -> None:
+        """画像 worker 完成 → UI 线程渲染；R1：收尾时补发被去重吞掉的重载请求。
+
+        与 _on_rank_loaded/_on_zone_loaded/_on_zone_failed 口径一致：无论成功、
+        失败还是页面类型不符，都必须清掉 _pending_reload 里的本页条目，否则
+        画像页在途时的第二次请求会被永久吞掉（pending 残留）。
+        """
         self._inflight.discard(page_id)
         self._loaders.pop(page_id, None)
         page = self._pages.get(page_id)
-        if not isinstance(page, ProfilePage):
-            return
-        if error:
-            page._summary.setText(f"画像加载失败（可重试）：{error}")
-            return
-        page.apply_profile(data)
-        page.loaded = True
+        if isinstance(page, ProfilePage):
+            if error:
+                page._summary.setText(f"画像加载失败（可重试）：{error}")
+            else:
+                page.apply_profile(data)
+                page.loaded = True
+        self._flush_pending_reload(page_id)
 
     def _start_recommend(self) -> None:
         """W16 F3：「开始推荐」→ RankLoader（W13 生产接线复用）+ 自动切推荐专区页。"""

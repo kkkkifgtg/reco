@@ -124,6 +124,43 @@ def test_inflight_dedup_and_failure_retry(qapp, store):
     QThreadPool.globalInstance().waitForDone(3000)
 
 
+def test_profile_inflight_second_request_is_not_swallowed(qapp, store, monkeypatch):
+    """R1：画像页在途时再请求一次 → 收尾后补发，_pending_reload 不残留 'profile'。
+
+    回归点：_on_profile_loaded 曾漏调 _flush_pending_reload → 画像页的 pending
+    条目永久残留（在途加载期间的第二次重载请求被吞）。
+    """
+    import reco_ui.pages as pages
+    from reco_ui.app import MainWindow
+
+    def slow_profile_rows(_store):
+        time.sleep(0.3)  # 保持 loader 在途，给第二次请求留窗口
+        return {"has_profile": False}
+
+    monkeypatch.setattr(pages, "profile_rows", slow_profile_rows)
+
+    win = MainWindow(store=store)
+    win._start_load("profile")
+    assert "profile" in win._inflight, "画像加载应已在途"
+    win._start_load("profile")  # 在途二次请求 → 记入 pending 并补发
+    assert "profile" in win._pending_reload, "在途二次请求应先记入 pending"
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        from reco_ui.qt import QApplication
+
+        QApplication.processEvents()
+        if "profile" not in win._pending_reload and "profile" not in win._inflight:
+            break
+        time.sleep(0.02)
+
+    assert "profile" not in win._pending_reload, (
+        "画像页 pending 不得永久残留: "
+        f"{win._pending_reload}"
+    )
+    win.close()
+
+
 def test_zone_menu_build_idempotent(qapp, store):
     """坑 7：QMenu 构建幂等——重复构建不崩、每次新实例、动作数稳定。
 
