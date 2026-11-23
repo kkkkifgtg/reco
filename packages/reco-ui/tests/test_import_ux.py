@@ -103,7 +103,7 @@ def test_start_recommend_triggers_rank_loader_and_switches(qapp, store, tmp_path
     class FakeRankLoader(QRunnable):
         instances: list = []
 
-        def __init__(self, s):
+        def __init__(self, s, exploration_count=None):
             super().__init__()
             self.signals = RankLoaderSignals()
             FakeRankLoader.instances.append(self)

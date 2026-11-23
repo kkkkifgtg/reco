@@ -342,7 +342,7 @@ class MainWindow(QMainWindow):
         elif isinstance(page, RecommendPage):
             # W13 承接①：生产 rank 消费接线（RankLoader → apply_rank，零排序 A6）。
             self._inflight.add(page_id)
-            loader = RankLoader(self._store)
+            loader = RankLoader(self._store, exploration_count=page.generate_spin.value())  # #82
             loader.signals.finished.connect(
                 lambda out, err, pid=page_id: self._on_rank_loaded(pid, out, err))
             self._loaders[page_id] = loader

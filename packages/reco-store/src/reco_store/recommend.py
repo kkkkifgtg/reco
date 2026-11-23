@@ -164,7 +164,7 @@ def mute_map_from_store(store) -> dict[str, Any]:
     return mute
 
 
-def rank_candidates(store) -> dict:
+def rank_candidates(store, config=None) -> dict:
     """唯一装配：库态 → 画像/静音/真实候选向量 → rank_only 唯一入口（A6）。
 
     候选域 = candidate 专区（T4；liked 只作正样本，推荐专区为输出落位）。
@@ -188,7 +188,8 @@ def rank_candidates(store) -> dict:
     candidate_vector_count = sum(1 for bid, _key in candidate_books if vectors.get(bid))
     profile = load_profile(store)
     mute = mute_map_from_store(store)
-    out = rank_only(candidates, profile, mute=mute, positive_vectors=positive_vectors)
+    out = rank_only(candidates, profile, mute=mute, positive_vectors=positive_vectors,
+                    config=config)  # #82：生成篇数（探索位配额）由此贯通到 rank
     out["names"] = load_book_names(store)
     out["n_candidates"] = len(candidates)
     out["n_vectors"] = len(positive_vectors)  # 库级：空态区分「是否已生产向量」

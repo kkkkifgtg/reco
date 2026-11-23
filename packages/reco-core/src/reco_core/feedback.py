@@ -377,7 +377,7 @@ def rank_only(candidate_features, profile, mute=None, config=None, *,
     candidates, sp, muted_ids = _score_feedback_aware(
         candidate_features, profile, config, mute_by_key=mute,
         positive_vectors=positive_vectors, now=now)
-    rows = score_rank(candidates, sp, {}, now=now,
+    rows = score_rank(candidates, sp, config, now=now,  # #82：透传 config（exploration_count）
                       exploration_exclude=frozenset(muted_ids))
     rows = _mark_muted_reasons(rows, muted_ids)
     return {
