@@ -27,11 +27,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Mapping
 
-from reco_core.profile import build_profile, update_profile
+from reco_core.profile import build_profile, persist_profile_snapshot, update_profile
 from reco_core.score import Profile as ScoreProfile
 from reco_core.score import Reason as ScoreReason
 from reco_core.score import rank as score_rank
@@ -45,6 +45,8 @@ __all__ = [
     "feedback_effects",
     "handle_feedback",
     "persist_feedback",
+    "checkpoint_profile",
+    "record_feedback",
     "rehydrate_from_events",
     "rank_only",
 ]
@@ -201,6 +203,82 @@ def persist_feedback(kind, book_id, axis=None, value=1.0, store=None, now=None, 
         store.append(event)
         appended = True
     return {"event": event, "appended": appended, "kind": kind, "book_id": book_id}
+
+
+def _event_type_of(event) -> str:
+    """事件类型：兼容 Event 对象与 dict 两种重放输入。"""
+    value = getattr(event, "event_type", None)
+    if value is None and isinstance(event, Mapping):
+        value = event.get("event_type")
+    return str(value or "")
+
+
+def _event_id_of(event):
+    """事件 id：兼容 Event 对象与 dict 两种重放输入。"""
+    value = getattr(event, "event_id", None)
+    if value is None and isinstance(event, Mapping):
+        value = event.get("event_id")
+    return int(value) if value is not None else None
+
+
+def _without_just_appended(events, event):
+    """剔除「刚由 persist_feedback 落库的那条事件」，得到折叠基线。
+
+    store 会重新分配 event_id（persist_feedback 的 event_id 是时间戳派生占位，
+    见其 docstring），两者不可直接比对，故按 (类型, 发生时间, book_id) 认最后一条。
+    """
+    if not events:
+        return events
+    last = events[-1]
+    same = (
+        _event_type_of(last) == _event_type_of(event)
+        and str(getattr(last, "occurred_at", "")) == str(
+            event.get("occurred_at") if isinstance(event, Mapping) else getattr(event, "occurred_at", ""))
+        and getattr(last, "book_id", None) == (
+            event.get("book_id") if isinstance(event, Mapping) else getattr(event, "book_id", None))
+    )
+    return list(events[:-1]) if same else list(events)
+
+
+def checkpoint_profile(store, event, *, config=None, now=None, config_fingerprint=None):
+    """把「折叠 event 之后」的画像版本快照写回事件流（#71）。
+
+    返回 (ProfileData, snapshot_event_id|None)。
+
+    口径：event 此时已由 persist_feedback 落库，因此基线必须在**剔除该事件**的
+    历史流上重放，再折叠一次 —— 否则同一事件被折叠两遍，快照与 load_profile 不一致。
+    版本号取「事件流里已有快照数 + 1」，使 profile_versions 历史行的 reason 序号连续
+    （rehydrate 基线恒为 v1，不随快照数变化）。
+    """
+    events = list(store.read_events())
+    prior = sum(1 for ev in events if _event_type_of(ev) == "profile_updated")
+    base = replace(rehydrate_from_events(_without_just_appended(events, event),
+                                         config=config, now=now), version=prior)
+    profile = update_profile(base, event, config=config, now=now)
+    return profile, persist_profile_snapshot(store, profile,
+                                             config_fingerprint=config_fingerprint)
+
+
+def record_feedback(kind, book_id, axis=None, value=1.0, store=None, now=None,
+                    event_id=None, config=None, config_fingerprint=None):
+    """反馈写入口（CLI/GUI 共用）：落反馈事件 + 画像版本快照（#71）。
+
+    在 persist_feedback 之上补一步：like/dislike 折叠进画像后把 profile_updated
+    快照 append 进事件流，profile_versions 因此有历史版本可追溯。
+    add_to_pool 不进口味流（§7 隔离），故既不折叠也不落快照。
+    """
+    result = persist_feedback(kind, book_id=book_id, axis=axis, value=value,
+                              store=store, now=now, event_id=event_id)
+    result["profile"] = None
+    result["profile_event_id"] = None
+    if store is not None and kind in ("like", "dislike"):
+        # store 会重新分配 event_id（persist_feedback 里的 event_id 只是时间戳派生占位），
+        # 所以折叠落库后的那条事件：快照 high_water 才与重放口径一致。
+        events = list(store.read_events())
+        result["profile"], result["profile_event_id"] = checkpoint_profile(
+            store, events[-1] if events else result["event"], config=config,
+            now=_coerce_now(now), config_fingerprint=config_fingerprint)
+    return result
 
 
 def rehydrate_from_events(events, config=None, now=None):

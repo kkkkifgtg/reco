@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from reco_core.feedback import feedback_effects, persist_feedback
+from reco_core.feedback import feedback_effects, record_feedback as _record_feedback
 from reco_store import Store, dedup_key, normalize_book_name
 
 GUI_SEED_FP = "gui/seed/1"
@@ -126,7 +126,8 @@ def record_feedback(store: Store, kind: str, book_id, axis=None, value=1.0, now=
         raise ValueError(f"未知反馈类型: {kind!r}（允许 {_VALID_KINDS}）")
     now_dt = _coerce_now(now)
     book = int(book_id)
-    result = persist_feedback(kind, book_id=book, axis=axis, value=value,
+    # 共用写入口：除反馈事件外还折叠画像并落 profile_versions 快照（#71）。
+    result = _record_feedback(kind, book_id=book, axis=axis, value=value,
                               store=store, now=now_dt)
     event_id = int(result["event"]["event_id"])
     if kind == "dislike":
