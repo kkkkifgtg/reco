@@ -122,6 +122,24 @@ class ZoneTableModel(QAbstractTableModel):
         self._rows: list[tuple] = list(rows)
         self._reset_calls = 0
 
+    def book_id_at(self, row: int) -> int | None:
+        """行号 → book_id；越界/不可解析返回 None（负索引不得回绕到末行）。
+
+        #79：双击打开阅读页的身份来源。调用方必须用**当前模型行**解析，
+        不得把行号交给别处按位置重查列表（搜索过滤/分页偏移会让同一行号
+        指向另一本书，用户随后『标为喜欢』就标记了他从未选中的书）。
+        """
+        try:
+            idx = int(row)
+        except (TypeError, ValueError):
+            return None
+        if not (0 <= idx < len(self._rows)):
+            return None
+        try:
+            return int(self._rows[idx][0])
+        except (TypeError, ValueError, IndexError):
+            return None
+
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._rows)
 
@@ -439,44 +457,49 @@ class BookSourceSignals(QObject):
 
 
 class BookSourceWorker(QRunnable):
-    """双击打开阅读页的源查询 worker：行与源路径都在池线程读取（§11.1 UI 线程零 DB）。
+    """双击打开阅读页的源查询 worker：书号与源路径都在池线程读取（§11.1 UI 线程零 DB）。
 
     #58：原实现在 UI 线程调 zone_page_rows + read_conn；改为 worker 后
     UI 线程只接收结果并决定是否发 reader_requested。
+
+    #79：入参从「行号」改为「book_id」。行号是**视图状态**（搜索过滤、分页偏移、
+    加载后行序变化都会移动它），worker 里重查 zone_page_rows(默认 limit=200 /
+    offset=0 / 不含搜索关键词) 再按行号取书，会取到另一本——用户搜索后双击看到
+    的 A 打开成 B，随即在阅读页点「标为喜欢」就把 B 标记了（他从未选中的书）。
+    书号由 UI 线程在点击瞬间从当前模型行解析（ZonePage._on_double_clicked →
+    ZoneTableModel.book_id_at），worker 只按书号查源路径，不再做位置解析。
     """
 
-    def __init__(self, store, zone: str, row: int) -> None:
+    def __init__(self, store, zone: str, book_id: int) -> None:
         super().__init__()
         self._store = store
         self._zone = zone
-        self._row = int(row)
+        self._book_id = int(book_id)
         self.signals = BookSourceSignals()
         _ACTIVE_LOADERS.add(self)
 
     def run(self) -> None:
         try:
-            rows = zone_page_rows(self._store, self._zone)
+            path, name = self._lookup_source(self._book_id)
         except Exception as exc:  # UI 只收字符串/类名
-            self._emit(0, "", "", f"{type(exc).__name__}")
+            self._emit(self._book_id, "", "", f"{type(exc).__name__}")
             return
-        if not (0 <= self._row < len(rows)):
-            self._emit(0, "", "", "")
-            return
-        book_id = int(rows[self._row][0])
-        name = str(rows[self._row][1])
-        path = self._lookup_source(book_id)
-        self._emit(book_id, path, name, "")
+        self._emit(self._book_id, path, name, "")
 
-    def _lookup_source(self, book_id: int) -> str:
-        """本专区该书的现存路径；无 files(present=1) 行 → 空串（不猜名字映射）。"""
+    def _lookup_source(self, book_id: int) -> tuple[str, str]:
+        """本专区该书的（现存路径, 书名）；无 files(present=1) 行 → 空路径（不猜名字映射）。"""
         conn = self._store.read_conn()
         try:
             row = conn.execute(
-                "SELECT path FROM files WHERE book_id = ? AND zone = ? AND present = 1"
-                " ORDER BY file_id LIMIT 1", (int(book_id), self._zone)).fetchone()
+                "SELECT f.path, b.display_name FROM files f"
+                " LEFT JOIN books b ON b.book_id = f.book_id"
+                " WHERE f.book_id = ? AND f.zone = ? AND f.present = 1"
+                " ORDER BY f.file_id LIMIT 1", (int(book_id), self._zone)).fetchone()
         finally:
             conn.close()
-        return str(row[0]) if row is not None else ""
+        if row is None:
+            return "", ""
+        return str(row[0]), ("" if row[1] is None else str(row[1]))
 
     def _emit(self, book_id: int, path: str, name: str, error: str) -> None:
         try:
@@ -734,8 +757,14 @@ class ZonePage(QWidget):
         row = index.row()
         if not (0 <= row < self._model.rowCount()):
             return
+        # #79：书号在点击瞬间从可见行解析并固定——不把行号交给 worker 重查列表
+        # （搜索过滤/分页偏移会让同一个行号指向另一本书，导致点 A 标 B）。
+        book_id = self._model.book_id_at(row)
+        if book_id is None:
+            self._status.setText("该行书号无法解析")
+            return
         self._status.setText("打开中…")
-        worker = BookSourceWorker(self._store, self.zone, row)
+        worker = BookSourceWorker(self._store, self.zone, book_id)
         worker.signals.done.connect(self._on_source_ready)
         QThreadPool.globalInstance().start(worker)
 
