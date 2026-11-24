@@ -1,6 +1,9 @@
-"""Taxonomy 视图与 normalize_tag（工单 06；Q11：v1 只做 alias 精确命中）。
+"""Taxonomy 视图与 normalize_tag（工单 06；Q11 alias 精确命中；#83 值行显示名参与）。
 
 - 别名身份：strip + casefold 全等才算命中，绝不模糊猜。
+- 值行显示名参与匹配（#83）：tag_id 含 "." 的值标签，其显示名（len>=2 且含 CJK）
+  进入身份/匹配词表；单字（攻/受/长/爽）与纯 ASCII（HE/BE）不参与——作为子串
+  探针精度不可接受，仍走人工/提案路径。
 - 只在 status=active 标签上识别；merged 行经 merged_into 链解析到目标；
   archived 行完全不解析（不参与打分，CONTEXT.md/§6.2）。
 - 冲突（多 active 标签同 alias）：别名最长者胜；等长平局 → tag_id 字典序
@@ -16,6 +19,35 @@ from reco_labels.store import LabelsStore, TagRow
 
 def _norm(text: str) -> str:
     return text.strip().casefold()
+
+
+def value_label_for_match(row: TagRow) -> str | None:
+    """值行可作匹配词的显示名；非值行/单字/纯 ASCII 显示名返回 None。
+
+    #83 精度护栏：单字（攻/受/长/爽）与纯 ASCII（HE/BE）作子串探针会大量误伤，
+    不进入匹配词表，仍走人工/提案路径。
+    """
+    if "." not in row.tag_id:
+        return None
+    label = str(row.label or "").strip()
+    if len(label) >= 2 and any("\u4e00" <= ch <= "\u9fff" for ch in label):
+        return label
+    return None
+
+
+def match_keys(row: TagRow) -> tuple[str, ...]:
+    """匹配/识别词表：tag_id + aliases；值行（tag_id 含 "."）额外收显示名。
+
+    #83 裁定（报告人：书应有标签、自动打标要可用）：值标签的显示名是自然语言词
+    （催眠/调教/强制/校园…），不参与匹配会让词表饥饿（种子 164 行仅 1 个别名）
+    → 大部分书零标签、画像单薄。收词条件见 value_label_for_match。
+    改显示名会影响其后的匹配；历史 basis_json 已固化当时命中的词串，不受影响。
+    """
+    keys = [str(row.tag_id), *(str(a) for a in row.aliases)]
+    label = value_label_for_match(row)
+    if label:
+        keys.append(label)
+    return tuple(k for k in keys if k.strip())
 
 
 @dataclass(frozen=True)
@@ -62,8 +94,8 @@ def load_taxonomy(store: LabelsStore) -> Taxonomy:
         via_chain = final is not None and final != row.tag_id
         if final is None:
             continue
-        # 身份键：tag_id 本身 + 全部 alias（显示名 label 不参与——改 label 不影响历史）
-        keys = (row.tag_id, *row.aliases)
+        # 身份/匹配键：tag_id + aliases + 值行显示名（match_keys；#83）
+        keys = match_keys(row)
         for key in keys:
             norm = _norm(key)
             if not norm:

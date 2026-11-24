@@ -77,8 +77,10 @@ def test_extract_summary_is_json_with_exact_keys(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     summary = json.loads(out)  # stdout 纯净 JSON
-    assert set(summary) == {"total", "ok", "failed", "vectors"}
-    assert summary == {"total": 1, "ok": 1, "failed": 0, "vectors": 1}
+    assert set(summary) == {"total", "ok", "failed", "vectors", "tagged", "proposals"}
+    # #83：candidate 专区也打标；样本文本无标签词 → tagged=0；
+    # 未知内容词（count>=3）进提案（具体数量随分词词表变化，只下界断言）
+    assert summary["tagged"] == 0 and summary["proposals"] >= 1
     assert _count(db, "feature_vectors") == 1
     assert _count(db, "features") == 1
 
@@ -97,7 +99,7 @@ def test_extract_picks_nonzero_present_file_for_same_book(tmp_path, capsys):
 
     assert main(["extract", "--db", str(db)]) == 0
     summary = json.loads(capsys.readouterr().out)
-    assert summary == {"total": 1, "ok": 1, "failed": 0, "vectors": 1}
+    assert summary["tagged"] == 0 and summary["proposals"] >= 1
 
     store = open_store(db)
     try:
@@ -122,7 +124,8 @@ def test_extract_empty_only_book_counts_failed_not_crash(tmp_path, capsys):
     rc = main(["extract", "--db", str(db)])
 
     assert rc == 0
-    assert json.loads(capsys.readouterr().out) == {"total": 1, "ok": 0, "failed": 1, "vectors": 0}
+    assert json.loads(capsys.readouterr().out) == {"total": 1, "ok": 0, "failed": 1,
+                                                   "vectors": 0, "tagged": 0, "proposals": 0}
     assert _count(db, "feature_vectors") == 0
 
 
@@ -134,8 +137,9 @@ def test_extract_missing_file_counts_failed(tmp_path, capsys):
     _seed(store_module, db, str(missing), ino=10, size=100, dedup="k-missing")
 
     assert main(["extract", "--db", str(db)]) == 0
-    assert json.loads(capsys.readouterr().out) == {"total": 1, "ok": 0, "failed": 1, "vectors": 0}
-    assert _count(db, "features") == 0
+    assert json.loads(capsys.readouterr().out) == {"total": 1, "ok": 0, "failed": 1,
+                                                   "vectors": 0, "tagged": 0, "proposals": 0}
+    assert _count(db, "features") == 0  # 文件缺失：打标同样无从谈起
 
 
 def test_extract_limit_processes_books_in_book_id_order(tmp_path, capsys):
@@ -148,6 +152,6 @@ def test_extract_limit_processes_books_in_book_id_order(tmp_path, capsys):
     _seed(store_module, db, str(second), ino=11, size=second.stat().st_size, dedup="k-2")
 
     assert main(["extract", "--db", str(db), "--limit", "1"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"total": 1, "ok": 1, "failed": 0, "vectors": 1}
+    assert json.loads(capsys.readouterr().out)["tagged"] == 0  # 样本文本无标签词
     assert _count(db, "features") == 1
     assert _count(db, "feature_vectors") == 1

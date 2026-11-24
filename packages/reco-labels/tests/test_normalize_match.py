@@ -47,9 +47,11 @@ def test_normalize_casefold_and_strip():
     assert normalize_tag("MIND CONTROL", taxonomy) == "mech.hypnosis"
 
 
-def test_normalize_label_is_not_identity():
-    """显示名不参与机器识别：改 label 不影响历史（规格原则）。"""
-    assert normalize_tag("催眠", _taxonomy()) is None
+def test_normalize_value_label_is_recognized():
+    """#83：值行显示名参与识别（催眠 → mech.催眠）；ASCII 显示名仍不参与。"""
+    # 种子 override：值「催眠」的 tag_id 即 mech.hypnosis；显示名参与识别后命中它
+    assert normalize_tag("催眠", _taxonomy()) == "mech.hypnosis"
+    assert normalize_tag("HE", _taxonomy()) is None  # 纯 ASCII 显示名不参与
 
 
 def test_normalize_unknown_is_none_no_fuzzy():
@@ -60,13 +62,16 @@ def test_normalize_unknown_is_none_no_fuzzy():
 
 
 def test_normalize_user_tag_needs_alias_upgrade():
-    """新增 user 标签暂不自动识别；补 alias 后升级为可识别。"""
+    """单字显示名的 user 标签不参与匹配（精度护栏）；补 alias 后升级为可识别。
+
+    #83 起 >=2 字 CJK 显示名直接参与识别（见 test_normalize_value_label_is_recognized）；
+    本例用单字显示名「缚」验证 alias 升级路径仍然成立。
+    """
     store = _store()
-    taxonomy = load_taxonomy(store)
-    add_tag(store, tag_id="mech.契约缚", axis="mechanism", label="契约缚", parent="mech")
-    assert normalize_tag("契约缚", load_taxonomy(store)) is None  # label 非身份
-    set_aliases(store, "mech.契约缚", ("契约控制",))
-    assert normalize_tag("契约控制", load_taxonomy(store)) == "mech.契约缚"
+    add_tag(store, tag_id="mech.缚", axis="mechanism", label="缚", parent="mech")
+    assert normalize_tag("缚", load_taxonomy(store)) is None  # 单字显示名不参与
+    set_aliases(store, "mech.缚", ("契约缚",))
+    assert normalize_tag("契约缚", load_taxonomy(store)) == "mech.缚"
 
 
 def test_normalize_resolves_merged_chain():
@@ -87,8 +92,11 @@ def test_normalize_archived_not_resolvable():
     store = _store()
     archive_tag(store, "mech.hypnosis")
     taxonomy = load_taxonomy(store)
-    assert normalize_tag("精神控制", taxonomy) is None
-    assert normalize_tag("mech.hypnosis", taxonomy) is None
+    assert normalize_tag("mech.hypnosis", taxonomy) is None   # 归档 id 不再解析
+    assert normalize_tag("mind control", taxonomy) is None    # 归档标签专属别名失效
+    # #83：同形词改经各自存活的值标签显示名命中
+    assert normalize_tag("精神控制", taxonomy) == "mech.精神控制"
+    assert normalize_tag("洗脑", taxonomy) == "mech.洗脑"
 
 
 def test_normalize_colliding_user_alias_deterministic():
@@ -170,7 +178,10 @@ def test_match_archived_excluded():
 
     store = _store()
     archive_tag(store, "mech.hypnosis")
-    assert match_tags(_stats({"洗脑": 2}), load_taxonomy(store)) == ()
+    # #83：洗脑改经存活值标签 mech.洗脑 命中；归档标签专属别名失效
+    hits = match_tags(_stats({"洗脑": 2}), load_taxonomy(store))
+    assert [h.tag_id for h in hits] == ["mech.洗脑"]
+    assert match_tags(_stats({"mind control": 2}), load_taxonomy(store)) == ()
 
 
 # ---------- explain_tag_hit ----------

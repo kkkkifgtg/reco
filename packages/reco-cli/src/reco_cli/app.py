@@ -19,6 +19,7 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from reco_io.perf import perf_span
@@ -128,6 +129,7 @@ def cmd_scan(root, *, db=None) -> int:
 # ---------------------------------------------------------------- extract
 
 EXTRACT_CONFIG_FP = "cli/extract/1"
+AUTOTAG_CONFIG_FP = "cli/autotag/1"  # #83：liked 自动打标事件的来源指纹
 # 提取侧非降级质量位：empty/oversized_streamed 仍是诚实统计（无向量时如实不写）
 _EXTRACT_OK_FLAGS = frozenset({"ok", "empty", "oversized_streamed"})
 
@@ -161,14 +163,66 @@ def _pick_extract_file(files: list[tuple[str, int]]) -> str | None:
     return None
 
 
+def _book_zones(store) -> dict[int, set[str]]:
+    """book_id → 出现过的专区集合（files 投影；双区同书两侧都算）。"""
+    conn = store.read_conn()
+    try:
+        rows = conn.execute(
+            "SELECT book_id, zone FROM files WHERE present = 1 AND book_id IS NOT NULL"
+        ).fetchall()
+    finally:
+        conn.close()
+    zones: dict[int, set[str]] = {}
+    for book_id, zone in rows:
+        zones.setdefault(int(book_id), set()).add(str(zone or ""))
+    return zones
+
+
+def _auto_tag_book_for_zone(store, book_id: int, path: str, zone: str, *, now: str) -> dict:
+    """单本自动打标（#83）：正文挖掘 → match/record → （仅 liked）tag_hit 画像事件。
+
+    candidate 也落 book_tags(source=auto)（报告人裁定：1529 本候选书同样打标），
+    但不落 tag_hit——未确认偏好不折叠进画像 axis_weights（防污染边界不变）。
+    正文只进分词器，计数以外的内容零落库（B 类）。
+    返回 {tagged, folded, inserted, proposed, alias_proposed}。
+    """
+    from reco_io.mining import mine_alias_counts
+    from reco_labels.auto_tag import StoreAdapter, auto_tag_book
+
+    counts = mine_alias_counts(path)
+    outcome = auto_tag_book(
+        StoreAdapter(store), book_id, zone,
+        SimpleNamespace(alias_counts=counts), now=now,
+    )
+    folded = zone == "liked"
+    if folded:
+        for hit in outcome.hits:
+            store.append_event(
+                "tag_hit",
+                payload={"axis": str(hit.basis.get("axis") or ""),
+                         "tag_id": hit.tag_id,
+                         "confidence": float(hit.confidence)},
+                book_id=int(book_id), occurred_at=now,
+                config_fingerprint=AUTOTAG_CONFIG_FP,
+            )
+    return {"tagged": bool(outcome.inserted or outcome.updated),
+            "folded": folded,
+            "inserted": list(outcome.inserted),
+            "proposed": list(outcome.proposed),
+            "alias_proposed": list(outcome.proposed_aliases)}
+
+
 def cmd_extract(db, *, limit=None) -> int:
     """批量提取：每本 features_computed（有向量时再 vector_computed）。
 
     - 遍历 files present=1（book_id 序）；每本取一个 size_bytes>0 且本机存在的
       文件，逐本调用 reco_io.extract.extract_and_record；
+    - #83：liked/candidate 专区书顺手自动打标（正文分词挖掘 → 命中落
+      book_tags(source=auto)；liked 再落 tag_hit 画像事件，candidate 不折叠画像；
+      未知高频词/谐音形近变体进 proposals 待确认）；
     - 无可用文件/降级（undecodable/corrupt_container/pending_timeout/
       unreadable）如实计 failed，整轮不中断；
-    - stdout 只输出 JSON 摘要 {total, ok, failed, vectors}（无正文）。
+    - stdout 只输出 JSON 摘要 {total, ok, failed, vectors, tagged, proposals}（无正文）。
     """
     from reco_io.extract import extract_and_record
 
@@ -176,8 +230,9 @@ def cmd_extract(db, *, limit=None) -> int:
         store = open_store(db)
         try:
             groups = _present_files_by_book(store)
+            zones = _book_zones(store)
             now = _utc_now_iso()
-            total = ok = failed = vectors = 0
+            total = ok = failed = vectors = tagged = proposals = 0
             for book_id, files in groups.items():
                 if limit is not None and total >= limit:
                     break
@@ -196,8 +251,21 @@ def cmd_extract(db, *, limit=None) -> int:
                     ok += 1
                 else:
                     failed += 1
+                book_zones = zones.get(book_id, ())
+                tag_zone = "liked" if "liked" in book_zones else (
+                    "candidate" if "candidate" in book_zones else None)
+                if tag_zone:
+                    # #83：liked/candidate 书自动打标；tag_hit 画像事件仅 liked；失败不中断整轮
+                    try:
+                        tag_res = _auto_tag_book_for_zone(store, book_id, path, tag_zone, now=now)
+                        tagged += 1 if tag_res["tagged"] else 0
+                        proposals += len(tag_res["proposed"]) + len(tag_res["alias_proposed"])
+                    except Exception as exc:
+                        print(f"warn: 自动打标失败 book={book_id} "
+                              f"({type(exc).__name__}: {exc})", file=sys.stderr)
             print(json.dumps({"total": total, "ok": ok, "failed": failed,
-                              "vectors": vectors}, ensure_ascii=False))
+                              "vectors": vectors, "tagged": tagged,
+                              "proposals": proposals}, ensure_ascii=False))
             return 0
         finally:
             store.close()

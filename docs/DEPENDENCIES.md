@@ -31,6 +31,7 @@
 |---|---|---|
 | torch | 2.15.0+cpu | 句向量备选前置；import 无 WinError 126/1114 |
 | sentence-transformers | 6.3.0 | 随 torch 线安装 |
+| jieba | 0.42.1 | #83 标签挖掘分词（reco_io.tokenizer/mining 延迟导入；缺失时 ngram 兜底） |
 | msvc-runtime | 14.51.36231 | CRT DLL 来源；pip install 后复制 12 个 CRT DLL 进 torch/lib（重建 venv 必须重放） |
 
 ## 开发依赖（根 pyproject [dependency-groups]）
