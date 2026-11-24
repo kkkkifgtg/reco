@@ -446,6 +446,15 @@ class ReaderPage(QWidget):
         self._flush_reading_signals()  # #73：返回即结算（再次进入是新会话）
         self.back_requested.emit()
 
+    def settle_session(self) -> None:
+        """「离开阅读」路径的会话结算（导航切走等；与关闭/返回同口径）。
+
+        #73 采集表：关闭/切走 → dwell。切走不结算会把离开时长计入下一次
+        结算，经 merge_signal 归一后放大短阅读的正权重。进度 flush 由调用
+        方先行；结算后会话置空，再次 open_book 自然开新会话。
+        """
+        self._flush_reading_signals()
+
     # ---------------------------------------------------------- 加载回调 / 首帧
     def _on_loaded(self, token: int, payload, error: str) -> None:
         if token != self._token:

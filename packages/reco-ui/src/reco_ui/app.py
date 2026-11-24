@@ -302,6 +302,7 @@ class MainWindow(QMainWindow):
             # 阅读中点左侧导航：先落进度并退出阅读上下文（标题不残留）。
             if self._reader is not None:
                 self._reader.flush_progress()
+                self._reader.settle_session()  # #73：切走即结算 dwell/read_time，离开时长不计入
             title = self._reader_return_title or "reco —— 本地小说推荐"
             self._reader_return_title = ""
             self._reader_return_widget = None

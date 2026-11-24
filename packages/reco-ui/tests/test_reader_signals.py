@@ -202,3 +202,41 @@ def test_repeated_scrolling_does_not_flood_signals(qapp, store, tmp_path):
     assert kinds.count("reopen") == 1
     assert "dwell" not in kinds, "未关闭就写 dwell = 每秒一条的风险"
     assert "read_time" not in kinds
+
+
+def test_nav_switch_settles_session(qapp, store, tmp_path):
+    """#73 采集表「关闭/切走 → dwell」：阅读中点导航切走必须即时结算。
+
+    回归钉住：app.MainWindow._on_nav 在阅读中只 flush_progress 不结算的
+    缺口——离开时长会被计入下一次结算，经 merge_signal 归一后放大短
+    阅读的正权重。同时钉住结算幂等（二次结算/关窗不双写）。
+    """
+    f, bid = _seed_candidate_file(store, tmp_path)
+    from reco_ui.app import MainWindow
+
+    win = MainWindow(store=store, config={"data_root": str(tmp_path / "data")})
+    try:
+        win._open_reader(str(f), bid)
+        assert _pump(lambda: win.reader_page.loaded), "open 超时"
+        assert _pump(lambda: any(r[1] == "reopen" for r in _signals(store, bid))), \
+            "打开未写 reopen"
+
+        win._on_nav(0)  # 阅读中点左侧导航（liked 页）＝切走
+        assert _pump(lambda: "dwell" in [r[1] for r in _signals(store, bid)]), \
+            "切走未结算 dwell"
+        kinds = [r[1] for r in _signals(store, bid)]
+        assert kinds.count("dwell") == 1, "dwell 每会话只应一条"
+        assert "read_time" in kinds, "切走未结算 read_time"
+
+        # 幂等：二次结算与关窗都不双写（会话已置空）
+        win._reader.settle_session()
+        assert _pump(lambda: True)
+        win.close()
+        assert _pump(lambda: True)
+        assert [r[1] for r in _signals(store, bid)].count("dwell") == 1, \
+            "结算后二次结算/关窗双写 dwell"
+    finally:
+        try:
+            win.close()
+        except RuntimeError:
+            pass
