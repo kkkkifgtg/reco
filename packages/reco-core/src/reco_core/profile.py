@@ -402,7 +402,10 @@ def _assemble(folder: _Folder, version: int, now_dt: datetime, weight_triple, we
     reason_parts.append(f"profile v{version}: {folder.n_pos} pos / {folder.n_neg} neg / {folder.n_behavior} behavior")
     payload = {
         "axis_weights_json": json.dumps(axis_weights, ensure_ascii=False, sort_keys=True),
-        "sample_counts_json": json.dumps({"tag_like": folder.n_pos, "tag_dislike": folder.n_neg, "behavior": folder.n_behavior}, sort_keys=True),
+        # #71 评审修复：快照 sample_counts 必须含 per_axis —— _Folder.restore 依赖它
+        # 恢复 Laplace 折叠态，三键口径是 restore 失忆缺口的根因；acceptance
+        # 「内容与 export_profile 一致」的完整口径见 export_profile.sample_counts。
+        "sample_counts_json": json.dumps(sample_counts, sort_keys=True),
         "top_tags_json": json.dumps([[axis, w] for axis, w in top_tags], ensure_ascii=False),
         "weights_json": json.dumps({"w_sim": weight_triple[0], "w_model": weight_triple[1], "w_behavior": weight_triple[2], "version": weight_version, "reason": weight_reason}, ensure_ascii=False),
         "half_life_days_json": json.dumps(dict(folder.tiers)),

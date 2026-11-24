@@ -59,9 +59,9 @@ def _last_event_id(store, event_type: str) -> int:
 
 def test_feedback_writes_profile_version_snapshot(tmp_path):
     """给一次反馈 → profile_versions 增加 1 行，内容与 export_profile 一致。"""
+    from reco_core.feedback import rehydrate_from_events
     from reco_core.profile import export_profile
     from reco_store import open_store
-    from reco_store.recommend import load_profile
     from reco_ui.glue import record_feedback
 
     store = open_store(tmp_path / "pv.db")
@@ -74,14 +74,17 @@ def test_feedback_writes_profile_version_snapshot(tmp_path):
         assert len(rows) == 1, "一次反馈应落一行画像版本快照"
         (created_at, axis_json, counts_json, confidence, top_json,
          weights_json, half_life_json, reason, high_water, fingerprint) = rows[0]
-        # 与 export_profile 同源（acceptance：内容与 export_profile 一致）
-        exported = export_profile(load_profile(store))
+        # 与 export_profile 同源（acceptance：内容与 export_profile 一致）。
+        # 注意：per_axis/axis_weights 是带衰减的折叠态，比较必须钉在与快照相同
+        # 的时钟（T0）上——load_profile 用墙钟重放，权重随真实时间衰减漂移，
+        # 逐位相等不可能成立（评审修复时实测：2.0 vs 1.9457…）。
+        exported = export_profile(rehydrate_from_events(store.read_events(), now=T0))
         assert json.loads(axis_json) == exported["axis_weights"]
-        assert json.loads(counts_json) == {
-            "tag_like": exported["sample_counts"]["tag_like"],
-            "tag_dislike": exported["sample_counts"]["tag_dislike"],
-            "behavior": exported["sample_counts"]["behavior"],
-        }
+        # acceptance「内容与 export_profile 一致」：快照必须是完整 sample_counts
+        # （含 per_axis —— _Folder.restore 依赖它恢复 Laplace 折叠态；三键口径会让
+        # restore 失忆，评审 M1）。behavior_signals/completeness 的持久化需
+        # profile_versions 表结构 v2（§5.3 迁移纪律），不在本 PR 范围，见 PR body 披露。
+        assert json.loads(counts_json) == exported["sample_counts"]
         assert confidence == pytest.approx(exported["confidence"]["value"], abs=1e-12)
         # top_tags 存的是未衰减的轴权重和（[[axis, weight], ...]），顺序与 export_profile 一致
         assert [t[0] for t in json.loads(top_json)] == [t["axis"] for t in exported["top_tags"]]
