@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Iterable, Mapping
 
 from reco_labels.match import TagHit, match_tags
@@ -152,7 +153,8 @@ class StoreAdapter:
         try:
             rows = conn.execute(
                 "SELECT proposal_id, kind, payload_json, status, created_at"
-                " FROM proposals ORDER BY proposal_id"
+                " FROM proposals ORDER BY json_extract(payload_json, '$.count') DESC,"
+                " json_extract(payload_json, '$.candidate') ASC"
             ).fetchall()
         finally:
             conn.close()
@@ -449,6 +451,43 @@ def auto_tag_book(
         book_id=book_id, zone=zone, skipped=skipped, hits=hits,
         record=record, proposed=proposed, proposed_aliases=proposed_aliases,
     )
+
+
+def append_tag_hit_events(store, hits, *, book_id: int, now: str,
+                          config_fingerprint: str = "labels/fold/1") -> int:
+    """把命中折叠进画像：逐 hit 落 tag_hit 事件（W9 update_profile 消费）。
+
+    仅对已确认正样本（liked）调用——candidate 的命中不折叠（防未确认偏好污染）。
+    payload 只含 axis/tag_id/confidence（数值+枚举，B 类，零正文）。
+    """
+    n = 0
+    for hit in hits:
+        store.append_event(
+            "tag_hit",
+            payload={"axis": str(hit.basis.get("axis") or ""),
+                     "tag_id": hit.tag_id,
+                     "confidence": float(hit.confidence)},
+            book_id=int(book_id), occurred_at=now,
+            config_fingerprint=config_fingerprint,
+        )
+        n += 1
+    return n
+
+
+def tag_book_and_fold(store, book_id: int, zone: str, alias_counts, *, now: str,
+                      config_fingerprint: str = "labels/fold/1") -> AutoTagOutcome:
+    """一站式打标编排：book_tags(source=auto) + 提案 +（仅 liked）tag_hit 画像折叠。
+
+    store 为 reco_store.Store（raw）：打标经 StoreAdapter 走 labels 事件词汇，
+    折叠直接落 tag_hit。candidate 不折叠——未确认偏好不进画像（#83/#85 裁定）。
+    """
+    outcome = auto_tag_book(StoreAdapter(store), book_id, zone,
+                            SimpleNamespace(alias_counts=dict(alias_counts or {})),
+                            now=now)
+    if zone == "liked":
+        append_tag_hit_events(store, outcome.hits, book_id=book_id, now=now,
+                              config_fingerprint=config_fingerprint)
+    return outcome
 
 
 def _stats_mapping(stats) -> dict:

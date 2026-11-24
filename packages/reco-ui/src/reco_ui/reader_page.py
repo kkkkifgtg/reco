@@ -17,6 +17,8 @@ worker 的其余异常只报异常类名，绝不回显底层消息（可能含�
 """
 from __future__ import annotations
 
+import sys
+
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -171,6 +173,17 @@ class ReaderLikeMoveWorker(QRunnable):
         # F2：move_book_to_liked 返回原路径 = 幂等 no-op（已在喜欢专区/源已移走），
         # 此时不能谎称「已移到喜欢专区」。
         moved = Path(str(dst)) != Path(src_path)
+        if moved:
+            # #85：标为喜欢后打通 提取→挖掘→打标→画像折叠（失败不影响移动结果）
+            try:
+                from reco_ui.tagging import process_book_for_profile
+
+                process_book_for_profile(
+                    self._store, str(dst), "liked",
+                    now=datetime.now(timezone.utc).isoformat())
+            except Exception as exc:
+                print(f"warn: 标为喜欢打标失败 book={self._book_id}: {exc}",
+                      file=sys.stderr)
         self._emit(True, moved, "")
 
     def _lookup_source(self):

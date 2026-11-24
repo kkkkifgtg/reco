@@ -72,8 +72,12 @@ def zone_rows(store: Store, zone: str, *, limit: int = 200,
         where = "f.zone = ? AND f.present = 1"
         params: list = [zone]
         if kw:
-            where += " AND b.display_name LIKE ?"
-            params.append("%" + kw + "%")
+            # #91：关键词同时命中书名与标签（标签显示名/tag_id 子串）——按标签筛选书籍
+            where += (" AND (b.display_name LIKE ? OR EXISTS ("
+                      "SELECT 1 FROM book_tags bt JOIN tags t ON t.tag_id = bt.tag_id"
+                      " WHERE bt.book_id = b.book_id"
+                      " AND (t.label LIKE ? OR t.tag_id LIKE ?)))")
+            params += ["%" + kw + "%", "%" + kw + "%", "%" + kw + "%"]
         raw = conn.execute(
             "SELECT b.book_id, b.display_name, b.size_bytes"
             " FROM files f JOIN books b ON b.book_id = f.book_id"
