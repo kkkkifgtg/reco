@@ -31,11 +31,15 @@ wheels/
 # 本机工具状态（非项目产物，不入库）
 .agent-teams/
 .deja/
+# gh 设备流/凭据状态（含 device-id，属于本机工具状态）
+.local/
 # DSH 插件自动生成（会被插件重写，入库存无意义 diff）
 docs/agents/workspace.yaml
 docs/agents/label-colors.yaml
 # 与本项目无关的独立小工具（如需纳入版本库请先移到 scripts/ 下）
 telegra_downloader.py
+telegra_downloader_gui.py
+telegra_icon.ico
 
 # 教学课程工作区（教学生成物，不入产品库）
 .teach/
