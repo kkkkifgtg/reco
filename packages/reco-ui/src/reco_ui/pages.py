@@ -361,9 +361,11 @@ class RankLoader(QRunnable):
     生产对齐面；装配层零排序复制（A6）。
     """
 
-    def __init__(self, store) -> None:
+    def __init__(self, store, exploration_count=None) -> None:
         super().__init__()
         self._store = store
+        # #82：生成篇数（探索位配额）；None = 不覆盖，沿用 score 默认 2 篇
+        self._exploration_count = exploration_count
         self.signals = RankLoaderSignals()
         _ACTIVE_LOADERS.add(self)  # 入队即持活（QThreadPool 不持 Python 包装）
 
@@ -371,8 +373,11 @@ class RankLoader(QRunnable):
         try:
             from reco_store.recommend import persist_rank_run, rank_candidates
 
+            # #82：控件值（生成篇数）经 config 传给唯一装配层；None = 沿用默认 2
+            config = (None if self._exploration_count is None
+                      else {"exploration_count": int(self._exploration_count)})
             with perf_span("ui.rank.load"):
-                out = rank_candidates(self._store)
+                out = rank_candidates(self._store, config=config)
                 # #70：推荐结果落库（rec_runs + recommendations），与 CLI 共用同一路径
                 # 失败不中断展示，但必须可见（静默吞异常曾掩盖真实 bug）
                 try:
