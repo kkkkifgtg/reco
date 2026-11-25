@@ -59,8 +59,9 @@ def test_S3_build_golden_fold_and_top_tags():
     assert ev["occurred_at"] == _iso(NOW)
     assert set(ev["payload"]) <= {
         "axis_weights_json", "sample_counts_json", "top_tags_json", "weights_json",
-        "half_life_days_json", "reason", "event_id_high_water", "profile_version",
-    }  # B6：payload 白名单子集
+        "half_life_days_json", "reason", "event_id_high_water", "confidence",
+        "profile_version",
+    }  # B6：payload 白名单子集（confidence 供 profile_versions 的 NOT NULL 列）
 
 
 def test_S5_older_feedback_counts_less_on_prewarmed_axis():

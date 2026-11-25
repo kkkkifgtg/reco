@@ -51,7 +51,7 @@ DEFAULT_HALF_LIFE_DAYS = {"tag": 90.0, "signal": 30.0, "stable": 180.0}
 DEFAULT_MAX_AXIS_STEP = 0.05
 _GENERATED_PAYLOAD_KEYS = frozenset({
     "axis_weights_json", "sample_counts_json", "top_tags_json", "weights_json",
-    "half_life_days_json", "reason", "event_id_high_water", "profile_version",
+    "half_life_days_json", "reason", "event_id_high_water", "confidence", "profile_version",
 })
 _REPLAY_TOL = 1e-9
 
@@ -402,12 +402,18 @@ def _assemble(folder: _Folder, version: int, now_dt: datetime, weight_triple, we
     reason_parts.append(f"profile v{version}: {folder.n_pos} pos / {folder.n_neg} neg / {folder.n_behavior} behavior")
     payload = {
         "axis_weights_json": json.dumps(axis_weights, ensure_ascii=False, sort_keys=True),
-        "sample_counts_json": json.dumps({"tag_like": folder.n_pos, "tag_dislike": folder.n_neg, "behavior": folder.n_behavior}, sort_keys=True),
+        # #71 评审修复：快照 sample_counts 必须含 per_axis —— _Folder.restore 依赖它
+        # 恢复 Laplace 折叠态，三键口径是 restore 失忆缺口的根因；acceptance
+        # 「内容与 export_profile 一致」的完整口径见 export_profile.sample_counts。
+        "sample_counts_json": json.dumps(sample_counts, sort_keys=True),
         "top_tags_json": json.dumps([[axis, w] for axis, w in top_tags], ensure_ascii=False),
         "weights_json": json.dumps({"w_sim": weight_triple[0], "w_model": weight_triple[1], "w_behavior": weight_triple[2], "version": weight_version, "reason": weight_reason}, ensure_ascii=False),
         "half_life_days_json": json.dumps(dict(folder.tiers)),
         "reason": "; ".join(reason_parts),
         "event_id_high_water": folder.high_water,
+        # #71：置信度也进快照 —— profile_versions.confidence 是 NOT NULL 列，
+        # 缺这条时投影层 KeyError，快照写不进去。
+        "confidence": float(conf.value),
         "profile_version": PROFILE_VERSION,
     }
     assert set(payload) <= _GENERATED_PAYLOAD_KEYS  # B6：payload 白名单子集（W5）
@@ -455,6 +461,28 @@ def update_profile(profile, event, config=None, now=None, weight_set=None) -> Pr
     folder = _Folder.restore(profile, tiers, max_step, now_dt)
     folder.fold_event(event, config)
     return _assemble(folder, int(profile.version) + 1, now_dt, triple, wver, wreason, fallback_reason, _config_fingerprint(config))
+
+
+def persist_profile_snapshot(store, profile, *, config_fingerprint=None, actor="system"):
+    """把画像版本快照写回事件流（#71）——profile_updated 是 profile_versions 唯一投影来源。
+
+    store 走鸭子协议（只要求 append_event）；快照事件自身不参与折叠，
+    因此追加快照不改变当前画像语义（load_profile 结果不变），只增加历史版本。
+    返回最后一个快照 event_id；未产出快照事件时返回 None。
+    """
+    event_ids = []
+    for event in tuple(profile.generated_events or ()):
+        event_ids.append(
+            store.append_event(
+                str(event["event_type"]),
+                book_id=event.get("book_id"),
+                payload=dict(event.get("payload") or {}),
+                occurred_at=str(event["occurred_at"]),
+                config_fingerprint=str(event.get("config_fingerprint") or config_fingerprint or "profile/1"),
+                actor=actor,
+            )
+        )
+    return event_ids[-1] if event_ids else None
 
 
 def export_profile(profile) -> dict:
