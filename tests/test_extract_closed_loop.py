@@ -79,8 +79,14 @@ def test_cli_extract_then_rank_rows_nonempty(tmp_path, capsys):
 
     assert main(["extract", "--db", str(db)]) == 0
     summary = json.loads(capsys.readouterr().out)
-    assert summary == {"total": 2, "ok": 2, "failed": 0, "vectors": 2,
-                       "tagged": 0, "proposals": 0}
+    # #117：proposals 数随分词器漂移（jieba 已装 8 条 / ngram 兜底 39 条），
+    # 不与写死的数字比较，而与库内真实行数对齐——摘要必须诚实反映落库结果。
+    assert summary["total"] == 2
+    assert summary["ok"] == 2
+    assert summary["failed"] == 0
+    assert summary["vectors"] == 2
+    assert summary["tagged"] == 0  # 夹具未装 seed taxonomy：无可命中标签
+    assert summary["proposals"] == len(_rows(db, "proposals")) > 0
 
     store = open_store(db)
     try:
@@ -100,11 +106,18 @@ def test_cli_extract_is_idempotent(tmp_path, capsys):
     first_summary = json.loads(capsys.readouterr().out)
     first_features = _rows(db, "features")
     first_vectors = _rows(db, "feature_vectors")
+    first_proposals = _rows(db, "proposals")
+    assert first_proposals  # 首轮确实挖出了待确认提案
 
     assert main(["extract", "--db", str(db)]) == 0
     second_summary = json.loads(capsys.readouterr().out)
 
-    assert second_summary == first_summary
+    # #117：proposals 统计的是「本轮新增」，二轮撞去重必然为 0；
+    # 幂等性用「提案表逐行不变」来断言，而不是拿两轮摘要整体相等。
+    assert _rows(db, "proposals") == first_proposals
+    assert second_summary["proposals"] == 0
+    for key in ("total", "ok", "failed", "vectors"):
+        assert second_summary[key] == first_summary[key], key
     # 特征向量（纯函数）逐行相等；features.computed_at 是「本次计算时刻」，随事件推进
     assert _rows(db, "feature_vectors") == first_vectors
     second_features = _rows(db, "features")

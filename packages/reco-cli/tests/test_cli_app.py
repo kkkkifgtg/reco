@@ -74,6 +74,7 @@ def test_C1_unknown_subcommand_exits_nonzero(capsys):
 
 # ---------- C2：UTF-8 输出回归（英文 locale 控制台不乱码） ----------
 
+@pytest.mark.skipif(sys.platform != "win32", reason="cp1252 是 Windows 西文 locale 特有编码")
 def test_C2_utf8_output_survives_cp1252_pipe(tmp_path):
     proc = subprocess.run(
         [sys.executable, "-m", "reco_cli", "--help"],
