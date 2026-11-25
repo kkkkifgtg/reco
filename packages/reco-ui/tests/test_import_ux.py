@@ -44,6 +44,7 @@ def test_open_zone_folder_helper_maps_all_three_zones(tmp_path):
     assert calls == [str(tmp_path / "liked"), str(tmp_path / "candidate"), str(tmp_path / "推荐专区")]
 
 
+@pytest.mark.skipif(not hasattr(os, "startfile"), reason="os.startfile 仅 Windows")
 def test_open_folder_button_calls_startfile_with_zone_dir(qapp, tmp_path, monkeypatch):
     """点按钮 → os.startfile(专区目录)；目录不存在时 ensure_zones 先创建。"""
     from reco_ui import pages
