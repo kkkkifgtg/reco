@@ -5,10 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "reco-labels"
 version = "0.1.0"
-description = "标签体系与文本统计量（不落正文；公开 API 占位，待 T4 起填充）"
+description = "标签体系、自动打标与待确认提案"
 requires-python = ">=3.12"
 dependencies = [
   "reco-core",
+  "reco-relations",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -17,3 +18,4 @@ packages = ["src/reco_labels"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = ["integration: 跨包集成测试"]

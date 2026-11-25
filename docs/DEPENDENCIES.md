@@ -1,69 +1,60 @@
-# DEPENDENCIES — 版本清单（工单 01）
+# DEPENDENCIES — 依赖与锁文件
 
-> 只记实装版本与声明下限；背景与决策见 docs/ARCHITECTURE.md §12 与 docs/adr/0004。
+> 采集日期：2026-11-25。版本以根 `uv.lock` 为准；本文件只解释归属与用途，不复制完整求解结果。
+> 环境：CPython 3.12、uv 0.13.10（安装在 `.venv`，不属于锁文件）、29 个锁定包。
 
-## 采集
+## 安装
 
-- 日期: 2026-11-21
-- 解释器: CPython 3.12.14（reco/.venv）
-- 锁定: uv 0.13.9（.venv/Scripts/uv.exe）+ uv.lock（Resolved 21 packages）
-- 安装: uv sync --inexact（不 prune torch 等票外包）
+```bash
+scripts/bootstrap.ps1                 # Windows
+scripts/bootstrap.sh                  # Git Bash / POSIX
+# 等价核心命令：.venv/Scripts/uv.exe sync --frozen --inexact
+```
 
-## 运行依赖（reco-core 声明，架构 §12/F1）
+`--frozen` 保证使用 `uv.lock`；`--inexact` 保留环境里由用户额外安装、未写入锁文件的包。首次安装需要访问包索引；锁文件本身不提供离线 wheel 缓存。
 
-| 包 | 实装版本 | 声明下限 | 说明 |
-|---|---|---|---|
-| numpy | 2.5.5 | numpy>=2.5 | 向量运算 |
-| scipy | 1.18.1 | scipy>=1.18 | sklearn 稀疏矩阵载体 |
-| scikit-learn | 1.9.1 | scikit-learn>=1.9 | TF-IDF 相似度/评估（延迟导入，F5） |
+## 直接运行依赖
 
-## GUI 依赖（reco-ui 声明，架构 §12/F1，工单 12）
+| 声明包 | 依赖 | 锁定版本 | 声明 | 用途 |
+|---|---|---:|---|---|
+| reco-core | numpy | 2.5.5 | `>=2.5` | 向量与评估数值运算 |
+| reco-core | scipy | 1.18.1 | `>=1.18` | scikit-learn 稀疏矩阵载体 |
+| reco-core | scikit-learn | 1.9.1 | `>=1.9` | 可选的成对分类与评估；生产提取管线不调用它 |
+| reco-io | pypdf | 7.1.1 | `>=7.1` | PDF 文本层读取 |
+| reco-io | zhconv | 1.4.3 | `>=1.4.3` | 标签候选词繁简归一 |
+| reco-ui | PyQt6 | 6.12.1 | `>=6.12` | 桌面 GUI；Qt 导入集中在 `reco_ui.qt` |
+| reco-ui | PyQt6-Qt6 | 6.12.0 | PyQt6 元数据依赖 | Qt6 运行库 |
+| reco-ui | PyQt6-sip | 13.13.1 | PyQt6 元数据依赖 | Python/Qt 绑定胶水 |
 
-| 包 | 实装版本 | 声明下限 | 说明 |
-|---|---|---|---|
-| PyQt6 | 6.12.1 | PyQt6>=6.12 | Qt 绑定（GPLv3/商业，本地自用不分发 §17 Q2）；Qt6 运行库 6.12.0 随 wheel |
-| PyQt6-Qt6 | 6.12.0 | （PyQt6 元数据依赖） | Qt 运行库 DLL（Qt6/bin 103 DLL） |
-| PyQt6-sip | 13.13.1 | （PyQt6 元数据依赖） | 绑定胶水 |
+### 工作区内部依赖
 
-## 可选依赖（ADR-0004 可插拔备选；不入 uv.lock/依赖声明）
+- `reco-cli` → `reco-core`、`reco-io`、`reco-store`
+- `reco-io` → `reco-store`、`reco-labels`、`reco-relations`
+- `reco-labels` → `reco-core`、`reco-relations`
+- `reco-relations`、`reco-store` → `reco-core`
+- `reco-ui` → `reco-core`、`reco-io`、`reco-labels`、`reco-store`
 
-| 包 | 实装版本 | 说明 |
+包描述、脚本入口与 pytest marker 声明位于各包 `pyproject.toml`；修改 import 结构时同步修改这些声明。
+
+## 开发依赖
+
+根 `pyproject.toml` 的 `dependency-groups.dev` 声明：
+
+| 包 | 锁定版本 | 声明 | 用途 |
+|---|---:|---|---|
+| pytest | 9.2.0 | `>=8.0` | 全仓测试 |
+| python-docx | 1.2.0 | `>=1.2` | 程序化生成 DOCX 合成测试样例 |
+
+## 可选、未入锁的依赖
+
+| 包 | 当前状态 | 说明 |
 |---|---|---|
-| torch | 2.15.0+cpu | 句向量备选前置；import 无 WinError 126/1114 |
-| sentence-transformers | 6.3.0 | 随 torch 线安装 |
-| jieba | 0.42.1 | #83 标签挖掘分词（reco_io.tokenizer/mining 延迟导入；缺失时 ngram 兜底） |
-| msvc-runtime | 14.51.36231 | CRT DLL 来源；pip install 后复制 12 个 CRT DLL 进 torch/lib（重建 venv 必须重放） |
+| jieba | 0.42.1（本机已装，未入锁） | 标签挖掘首选分词器；缺失时 `tokenizer` 诚实降级到内置字符 n-gram |
+| pkuseg | 环境可选安装 | 可选分词器；缺失时同样降级 |
+| torch / sentence-transformers | 默认不安装 | ADR-0004 的句向量备选；当前生产推荐未启用 |
 
-## 开发依赖（根 pyproject [dependency-groups]）
+可选分词器只影响标签候选切分，不影响 `reco-core` 的生产向量格式。任何新增第三方依赖都必须更新对应包声明、`uv.lock`、本文件与架构依赖说明。
 
-| 包 | 实装版本 | 声明 |
-|---|---|---|
-| pytest | 9.2.0 | pytest>=8.0 |
-| uv | 0.13.9 | .venv 内安装，不进锁文件 |
+## 向量口径
 
-## 离线 wheel 缓存（wheels/）
-
-| wheel | 大小 |
-|---|---|
-| numpy-2.5.5-cp312-cp312-win_amd64.whl | 12.6 MB |
-| scipy-1.18.1-cp312-cp312-win_amd64.whl | 36.7 MB |
-| scikit_learn-1.9.1-cp312-cp312-win_amd64.whl | 8.3 MB |
-| joblib-1.6.0-py3-none-any.whl | 0.3 MB |
-| narwhals-2.29.0-py3-none-any.whl | 0.5 MB |
-| threadpoolctl-3.8.0-py3-none-any.whl | 0.03 MB |
-| cloudpickle-3.1.3-py3-none-any.whl | 0.02 MB |
-| pyqt6-6.12.1-cp310-abi3-win_amd64.whl | 7.1 MB |
-| pyqt6_qt6-6.12.0-py3-none-win_amd64.whl | 79.7 MB |
-| pyqt6_sip-13.13.1-cp312-cp312-win_amd64.whl | 0.05 MB |
-
-- 离线重建命令（架构 §12）：`pip install --no-index --find-links wheels/ "numpy==2.5.5" "scipy==1.18.1" "scikit-learn==1.9.1"`
-- 断网演练: 2026-11-21 于临时 venv 以 `--no-index --find-links wheels/` 离线装齐 7 包并 import 验证通过（exit 0）。
-- PyQt6 离线重建（工单 12 实测）：pip 撞杀软 DLL 锁时，可 `.venv/Scripts/python.exe -m zipfile -e wheels/pyqt6_qt6-*.whl .venv/Lib/site-packages/` 直接解压恢复（2656 文件）。
-- pip 缓存: %LOCALAPPDATA%\\pip\\Cache（交叉印证用）。
-
-## torch CRT 对齐硬验收（ADR-0004）
-
-torch/lib 必须齐备 12 个 CRT DLL（System32 缺 vcruntime140_1 / vcruntime140_threads / msvcp140_atomic_wait，实测根因）：
-concrt140 / msvcp140 / msvcp140_1 / msvcp140_2 / msvcp140_atomic_wait / msvcp140_codecvt_ids / vcruntime140 / vcruntime140_1 / vcruntime140_threads / vccorlib140 / vcamp140 / vcomp140（均 .dll）。
-
-回归测试: packages/reco-core/tests/test_dependencies.py::test_torch_optional_crt_alignment（torch 缺席时 skip，装上未对齐时 fail）。
+生产链路 `reco_io.extract.vector_payload_from_features` 使用字符 2–3gram 哈希桶计数，保留 Top-64 个桶并做 L2 归一；`idf_version` 是既有列名，当前值为 `reco-ngram-counts/1`，明确表示没有 IDF。`reco_core.vectorize.char_ngram_bucket_tfidf` 另保留语料级 TF-IDF 实现，但当前提取入口没有调用它。

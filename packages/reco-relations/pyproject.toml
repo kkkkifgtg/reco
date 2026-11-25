@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "reco-relations"
 version = "0.1.0"
-description = "人物关系数据与相似度（公开 API 占位，待 T5 起填充）"
+description = "人物关系图提取、人工覆盖与相似度"
 requires-python = ">=3.12"
 dependencies = [
   "reco-core",
@@ -17,3 +17,4 @@ packages = ["src/reco_relations"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = ["integration: 跨包集成测试"]

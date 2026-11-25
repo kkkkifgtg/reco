@@ -1,15 +1,24 @@
-# reco 全验收清单（W14 收官，2026-11-21）
+# reco 验收记录
 
-> 执行环境：分支 feat/14-swap-drill（基线 master 65a07b2）；Python 3.12.14 / pytest 9.2.0；
-> 全仓 pytest **384 passed**（收官修正：根 testpaths 增 tests/ 目录 + consistency fixture
-> 切回 vector_blob_hex 正式键名，commit 121e6b6——验收过程自身发现并修复的两处收集盲点）。
-> 每条证据为实际执行的命令与输出摘要。「计划 §11」清单逐条对应；§ = docs/ARCHITECTURE.md v1.2。
+## 当前回归快照（2026-11-25）
+
+- 环境：Windows、CPython 3.12、`QT_QPA_PLATFORM=offscreen`。
+- 命令：`.venv/Scripts/python.exe -m pytest packages tests -q`。
+- 结果：**737 passed / 2 failed / 4 skipped**。跳过项为可选 torch/CRT 对齐与 POSIX 专属权限/符号链接测试；两处失败均在 `tests/test_extract_closed_loop.py`（既有缺陷，本次文档统一不涉及代码改动）。
+- 依赖：`uv.lock` 已由 uv 0.13.10 重新解析，共 29 个包；新增锁定 `zhconv 1.4.3`。
+- 下方 W14 清单是 2026-11-21 的历史收官证据，其 384/379 数字不代表当前基线。
+
+## W14 历史验收清单（2026-11-21）
+
+> 历史执行环境：分支 feat/14-swap-drill（基线 master 65a07b2）；Python 3.12.14 / pytest 9.2.0；
+> 该收官时全仓 pytest **384 passed**（当时修正了根 testpaths 与 vector blob 键名收集盲点）。
+> 每条证据保留当时实际执行的命令与输出摘要；§ = docs/ARCHITECTURE.md 当时的 v1.2。
 
 ## 1. 代码与 git 基线
 
 | # | 项目 | 结论 | 证据 |
 |---|---|---|---|
-| 1 | 代码全在 reco/ 内，git 基线可复现 | ✅ | 仓库根 F:\date\adult-reco\reco；git log 线性可读（master 65a07b2 → 收官分支）；所有工作票走 PR-first 分支 + merge --no-ff |
+| 1 | 代码全在 reco/ 内，git 基线可复现 | ✅ | 仓库根 F:\date\adult-reco；git log 线性可读（master 65a07b2 → 收官分支）；所有工作票走 PR-first 分支 + merge --no-ff |
 | 2 | 7 包独立可安装、独立可测 | ✅ | 隔离演练 v7（.scratch/reco-impl/notes/w14-isolated-install.sh）：7 包全部 deps_install=0 test=0 —— core 81 / labels 62 / relations 68 / store 36 / io 71 / cli 18 / ui 41 passed（独立 venv + editable 传递闭包）；演练暴露并修正 5 项契约缺陷（commit 998ebcb，披露记录在提交信息） |
 | 3 | 依赖方向单向无环（§4.1/L98-110） | ✅ | 源码 grep 实测：io→store/labels/relations；labels/relations/store→core；cli→core/io/store；ui→core/io/store；core 零内部依赖；ADR-0001 接缝（duck-typed/零跨包 import）由各包源码断言测试守护 |
 
@@ -62,6 +71,5 @@
 ## 遗留与移交
 
 - W8 遗留 _last_status 进程内状态多线程复核 → 归票 12（captain 裁定）。
-- auditor 3 处 if False else 死分支（test_profile_build/test_profile_update/match.py）→ 收尾票（captain 指示）。
 - 「不合口味」闭环的 GUI 展示文案接线（feedback.display → 状态栏）属 W12 契约，已由 reco-ui 消费面覆盖。
 - 全部 24 条证据可重放：命令与期望值均已入库（测试文件/脚本/文档）。

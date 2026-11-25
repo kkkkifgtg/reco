@@ -370,7 +370,7 @@ wheels = [
 
 [[package]]
 name = "reco"
-version = "0.0.0"
+version = "0.1.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]
@@ -394,6 +394,7 @@ source = { editable = "packages/reco-cli" }
 dependencies = [
     { name = "reco-core" },
     { name = "reco-io" },
+    { name = "reco-labels" },
     { name = "reco-store" },
 ]
 
@@ -401,6 +402,7 @@ dependencies = [
 requires-dist = [
     { name = "reco-core", editable = "packages/reco-core" },
     { name = "reco-io", editable = "packages/reco-io" },
+    { name = "reco-labels", editable = "packages/reco-labels" },
     { name = "reco-store", editable = "packages/reco-store" },
 ]
 
@@ -430,6 +432,7 @@ dependencies = [
     { name = "reco-labels" },
     { name = "reco-relations" },
     { name = "reco-store" },
+    { name = "zhconv" },
 ]
 
 [package.metadata]
@@ -438,6 +441,7 @@ requires-dist = [
     { name = "reco-labels", editable = "packages/reco-labels" },
     { name = "reco-relations", editable = "packages/reco-relations" },
     { name = "reco-store", editable = "packages/reco-store" },
+    { name = "zhconv", specifier = ">=1.4.3" },
 ]
 
 [[package]]
@@ -446,10 +450,14 @@ version = "0.1.0"
 source = { editable = "packages/reco-labels" }
 dependencies = [
     { name = "reco-core" },
+    { name = "reco-relations" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "reco-core", editable = "packages/reco-core" }]
+requires-dist = [
+    { name = "reco-core", editable = "packages/reco-core" },
+    { name = "reco-relations", editable = "packages/reco-relations" },
+]
 
 [[package]]
 name = "reco-relations"
@@ -481,6 +489,7 @@ dependencies = [
     { name = "pyqt6" },
     { name = "reco-core" },
     { name = "reco-io" },
+    { name = "reco-labels" },
     { name = "reco-store" },
 ]
 
@@ -489,6 +498,7 @@ requires-dist = [
     { name = "pyqt6", specifier = ">=6.12" },
     { name = "reco-core", editable = "packages/reco-core" },
     { name = "reco-io", editable = "packages/reco-io" },
+    { name = "reco-labels", editable = "packages/reco-labels" },
     { name = "reco-store", editable = "packages/reco-store" },
 ]
 
@@ -631,3 +641,9 @@ sdist = { url = "https://files.pythonhosted.org/packages/f6/cc/6253133b5bb138fc3
 wheels = [
     { url = "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl", hash = "sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8", size = 45571, upload-time = "2026-07-02T08:40:04.659Z" },
 ]
+
+[[package]]
+name = "zhconv"
+version = "1.4.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/25/47/c8ae2d5d4025e253211ff3d8c163f457db1da94976cb582337a5ab76cb87/zhconv-1.4.3.tar.gz", hash = "sha256:ad42d9057ca0605f8e41d62b67ca797f879f58193ee6840562c51459b2698c45", size = 211571, upload-time = "2021-10-31T05:59:44.096Z" }

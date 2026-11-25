@@ -6,14 +6,10 @@
 ## 快速开始
 
 ```bash
-# 首次：建虚拟环境并装依赖（Python 3.12）
-python -m venv .venv
-.venv/Scripts/python.exe -m pip install -e packages/reco-core -e packages/reco-io \
-    -e packages/reco-store -e packages/reco-labels -e packages/reco-relations \
-    -e packages/reco-cli -e packages/reco-ui
-.venv/Scripts/python.exe -m pip install pytest python-docx pypdf PyQt6 bandit
+# 首次：自动探测 Python 3.12、建 .venv、按 uv.lock 安装并跑测试
+scripts/bootstrap.ps1
 
-# 启动 GUI（或双击桌面 reco 图标）
+# 日常启动 GUI（或双击桌面 reco 图标）
 scripts/reco-ui.bat
 ```
 
@@ -35,7 +31,7 @@ F:\date\adult-reco\data\     # 数据根（可用 --data-root 或 config 覆盖�
 候选集 = **candidate 专区**（liked 只作正样本、不进候选；同书双区也排除）。
 
 1. 候选池专区点「开始推荐」→ 走 `rank_candidates` 唯一装配层
-2. 打分维度：相似度（TF-IDF 字符 n-gram）+ 画像权重 + 行为信号
+2. 打分维度：相似度（字符 2–3gram 哈希桶计数、Top-64、L2 归一）+ 画像权重 + 行为信号
 3. 每次固定划出**探索位**（默认 2 篇，界面可调），跨出舒适区
 4. 推荐列表可「加入候选池」；「不合口味」（负样本，带衰减、永不硬排除）与「标为喜欢」（真移动进 liked/）在阅读界面给出（双击作品进入阅读后可见；从「我喜欢」专区进入阅读时不显示）
 
@@ -55,7 +51,7 @@ F:\date\adult-reco\data\     # 数据根（可用 --data-root 或 config 覆盖�
 | epub | 逐章渲染（按 OPF spine 顺序，非文件名字典序） |
 | docx / pdf | 复用特征提取同一套读取器 |
 
-进度按书记忆（存 `reading_progress` 表，零事件），重开续读。
+进度按书记忆（存 `reading_progress` 表，位置本身不写事件），重开续读。打开、滚动、完读与关闭分别记录匿名 `reopen`、`dwell`、`completion`、`read_time` 行为信号；信号进入事件流，`read_time` 当前只记录，不折算画像权重。
 
 ### 标签
 
@@ -78,6 +74,7 @@ F:\date\adult-reco\data\     # 数据根（可用 --data-root 或 config 覆盖�
 - **唯一运行数据库 = 仓库根 `reco.db`**；`*.db` 已在 `.gitignore`，仓库不跟踪任何数据库文件。
 - `packages/` 下不得存放数据库副本（曾因此踩坑：GUI 打开空库导致推荐页误报「缺少特征向量」）。
 - 默认库路径由 `reco_ui.app._default_db_path()` 向上探测「含 `pyproject.toml` + `packages/` 的目录」得出，不依赖目录嵌套层数。
+- SQLite 使用 WAL；事件表是口味历史真相，投影表可重建。阅读位置与 GUI 使用量不属于口味事件流。
 
 ## 开发
 

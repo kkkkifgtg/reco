@@ -5,13 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "reco-io"
 version = "0.1.0"
-description = "导入导出与推荐专区写盘（公开 API 占位，待 T6 起填充）"
+description = "目录扫描、格式读取、特征提取、标签挖掘与落位"
 requires-python = ">=3.12"
 dependencies = [
   "reco-store",
   "reco-labels",
   "reco-relations",
-  "pypdf>=7.1",  # W17：PDF 文本层读取（wheels/ 缓存 + 断网演练）
+  "pypdf>=7.1",  # PDF 文本层读取
+  "zhconv>=1.4.3",  # 标签挖掘的繁简归一
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -20,3 +21,4 @@ packages = ["src/reco_io"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = ["integration: 跨包集成测试"]

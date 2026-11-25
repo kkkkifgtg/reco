@@ -29,15 +29,6 @@ Set-Location -LiteralPath $Root
 $VenvDir = Join-Path $Root '.venv'
 $VenvPy = Join-Path $VenvDir 'Scripts\python.exe'
 $UvExe = Join-Path $VenvDir 'Scripts\uv.exe'
-$Packages = @(
-    'reco-core',
-    'reco-store',
-    'reco-labels',
-    'reco-relations',
-    'reco-io',
-    'reco-cli',
-    'reco-ui'
-)
 
 function Test-PythonVersion {
     param(
@@ -116,15 +107,10 @@ if (Test-Path -LiteralPath $UvExe) {
     }
 }
 
-$editArgs = @()
-foreach ($package in $Packages) {
-    $editArgs += @('-e', (Join-Path 'packages' $package))
-}
-
-Write-Host "[4/5] Editable-installing 7 workspace packages"
-& $UvExe pip install --python $VenvPy --no-cache-dir @editArgs 'pytest>=8.0'
+Write-Host "[4/5] Syncing the locked workspace and dev dependencies"
+& $UvExe sync --frozen --inexact --python $VenvPy
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "Editable install failed"
+    Write-Error "Workspace sync failed"
     exit 1
 }
 
