@@ -11,34 +11,66 @@ from __future__ import annotations
 
 from pathlib import Path
 
-__all__ = ["mine_alias_counts"]
+__all__ = [
+    "mine_alias_counts", "mine_alias_counts_with_variants",
+    "merge_simplified_counts", "merge_simplified_counts_with_variants",
+]
 
 
 def mine_alias_counts(path, *, limit: int = 512) -> dict[str, int]:
     """单本正文 → 候选标签词计数（词频 Top limit；不可读/不支持 → 诚实空字典）。
 
-    #92：词条先做繁体→简体归一再计数——同一词的繁/简形态合并为同一候选，
+    #92：正文先做繁体→简体归一再分词——同一词的繁/简形态合并为同一候选，
     避免繁体小说把同一标签拆成两个提案。
     """
+    return mine_alias_counts_with_variants(path, limit=limit)[0]
+
+
+def mine_alias_counts_with_variants(
+    path, *, limit: int = 512,
+) -> tuple[dict[str, int], dict[str, tuple[str, ...]]]:
+    """同上，额外返回 {简体键: 繁体原形}（#92 别名保留用）。"""
     text = _decode_text(Path(path))
     if not text:
-        return {}
+        return {}, {}
     from reco_io.tokenizer import top_words  # 延迟导入：本模块 import 零成本
+    from reco_io.t2s import to_simplified
 
-    return merge_simplified_counts(dict(top_words(text, limit=limit)))
+    # #92：先归一再分词。繁体原文直接分词会被拆成「催眠」+「術」，简体原文
+    # 却是「催眠术」——同一个词在线路两头成了两个候选，计数永远合不到一起。
+    return merge_simplified_counts_with_variants(
+        dict(top_words(to_simplified(text), limit=limit))
+    )
 
 
 def merge_simplified_counts(counts: dict[str, int]) -> dict[str, int]:
     """繁/简同形合并：键 t2s 归一为简体，计数相加；单字丢弃（#92）。"""
-    from reco_io.t2s import to_simplified
+    return merge_simplified_counts_with_variants(counts)[0]
+
+
+def merge_simplified_counts_with_variants(
+    counts: dict[str, int],
+) -> tuple[dict[str, int], dict[str, tuple[str, ...]]]:
+    """#92：合并繁/简计数，并给出每个简体键的繁体原形（别名保留的原料）。
+
+    只归一不记原形，「催眠術」这个写法就被系统遗忘了——用户嘴里的词进不了
+    标签体系（搜不到、也挂不回）。原形从简体键反推（zhconv 繁化），而不是回
+    原文里找：分词器会把「催眠術」拆碎，字面回收不到。
+    """
+    from reco_io.t2s import to_simplified, to_traditional
 
     merged: dict[str, int] = {}
     for word, count in (counts or {}).items():
-        key = to_simplified(word)
+        key = to_simplified(str(word))
         if len(key) < 2:
             continue
         merged[key] = merged.get(key, 0) + count
-    return merged
+    variants: dict[str, tuple[str, ...]] = {}
+    for key in merged:
+        trad = to_traditional(key)
+        if trad != key:
+            variants[key] = (trad,)
+    return merged, variants
 
 
 def _decode_text(path: Path) -> str:

@@ -186,13 +186,13 @@ def _auto_tag_book_for_zone(store, book_id: int, path: str, zone: str, *, now: s
     正文只进分词器，计数以外的内容零落库（B 类）。
     返回 {tagged, folded, inserted, proposed, alias_proposed}。
     """
-    from reco_io.mining import mine_alias_counts
+    from reco_io.mining import mine_alias_counts_with_variants
     from reco_labels.auto_tag import StoreAdapter, auto_tag_book
 
-    counts = mine_alias_counts(path)
+    counts, variants = mine_alias_counts_with_variants(path)
     outcome = auto_tag_book(
         StoreAdapter(store), book_id, zone,
-        SimpleNamespace(alias_counts=counts), now=now,
+        SimpleNamespace(alias_counts=counts, alias_variants=variants), now=now,
     )
     folded = zone == "liked"
     if folded:

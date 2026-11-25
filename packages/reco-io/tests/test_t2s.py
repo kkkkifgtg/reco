@@ -30,6 +30,25 @@ def test_merge_simplified_counts_passthrough():
     assert merge_simplified_counts({"校園": 2}) == {"校园": 2}
 
 
+def test_to_traditional_basic():
+    from reco_io.t2s import to_traditional
+
+    assert to_traditional("催眠术") == "催眠術"
+    assert to_traditional("头发") == "頭髮"
+    assert to_traditional("") == ""
+    assert to_traditional("ABC-123") == "ABC-123"
+
+
+def test_merge_simplified_counts_exposes_traditional_variants():
+    """#92：归一的同时留下繁体原形，供采纳时登记为别名。"""
+    from reco_io.mining import merge_simplified_counts_with_variants
+
+    merged, variants = merge_simplified_counts_with_variants(
+        {"催眠術": 2, "催眠术": 1, "头发": 1})
+    assert merged == {"催眠术": 3, "头发": 1}
+    assert variants == {"催眠术": ("催眠術",), "头发": ("頭髮",)}
+
+
 def test_mine_alias_counts_applies_t2s(tmp_path):
     """挖掘结果中的繁体键已归一为简体（#92）。"""
     from reco_io.mining import mine_alias_counts

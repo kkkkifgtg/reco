@@ -415,7 +415,8 @@ def auto_tag_book(
       画像折叠（tag_hit）只应对 liked 落——candidate 的标注不进画像正样本；
     - taxonomy alias 命中 → record_tag_hits 落 book_tags(source=auto)
       （manual/user 由写入层 ManualTagProtected 拒绝 → skipped_manual）；
-    - 未知正计数词 → propose_tags 进 proposals(pending)，tags 表零改动。
+    - 未知正计数词 → propose_tags 进 proposals(pending)，tags 表零改动；
+    - #92：stats.alias_variants（{简体: 繁体原形}）随提案带上，采纳时成为别名。
     返回 AutoTagOutcome；调用方据 outcome.hits 落 tag_hit 事件供 W9 折叠画像。
     """
     if zone not in AutoTagOutcome.ZONES:
@@ -442,6 +443,7 @@ def auto_tag_book(
         if rest:
             proposals = propose_tags(
                 store, rest, threshold=propose_threshold, now=now,
+                variants=getattr(stats, "alias_variants", None),
             )
             proposed = tuple(p.candidate for p in proposals)
     skipped = not hits and not proposed and not proposed_aliases
@@ -476,15 +478,19 @@ def append_tag_hit_events(store, hits, *, book_id: int, now: str,
 
 
 def tag_book_and_fold(store, book_id: int, zone: str, alias_counts, *, now: str,
+                      alias_variants=None,
                       config_fingerprint: str = "labels/fold/1") -> AutoTagOutcome:
     """一站式打标编排：book_tags(source=auto) + 提案 +（仅 liked）tag_hit 画像折叠。
 
     store 为 reco_store.Store（raw）：打标经 StoreAdapter 走 labels 事件词汇，
     折叠直接落 tag_hit。candidate 不折叠——未确认偏好不进画像（#83/#85 裁定）。
     """
-    outcome = auto_tag_book(StoreAdapter(store), book_id, zone,
-                            SimpleNamespace(alias_counts=dict(alias_counts or {})),
-                            now=now)
+    outcome = auto_tag_book(
+        StoreAdapter(store), book_id, zone,
+        SimpleNamespace(alias_counts=dict(alias_counts or {}),
+                        alias_variants=dict(alias_variants or {})),
+        now=now,
+    )
     if zone == "liked":
         append_tag_hit_events(store, outcome.hits, book_id=book_id, now=now,
                               config_fingerprint=config_fingerprint)
