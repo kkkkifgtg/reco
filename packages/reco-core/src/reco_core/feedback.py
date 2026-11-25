@@ -200,7 +200,13 @@ def persist_feedback(kind, book_id, axis=None, value=1.0, store=None, now=None, 
     event["book_id"] = book_id
     appended = False
     if store is not None:
-        store.append(event)
+        assigned = store.append(event)
+        # 存储层会重新分配 event_id；把落库后的 id 记回事件，快照锚点据此对齐，
+        # 不再回头读「库尾事件」推断（#108：并发写会让库尾变成别人的事件）。
+        if isinstance(assigned, Mapping):
+            assigned = assigned.get("event_id")
+        if isinstance(assigned, int) and not isinstance(assigned, bool):
+            event["event_id"] = int(assigned)
         appended = True
     return {"event": event, "appended": appended, "kind": kind, "book_id": book_id}
 
@@ -221,12 +227,22 @@ def _event_id_of(event):
     return int(value) if value is not None else None
 
 
-def _without_just_appended(events, event):
-    """剔除「刚由 persist_feedback 落库的那条事件」，得到折叠基线。
+def _without_event(events, event):
+    """从事件流里剔除「刚由 persist_feedback 落库的那条事件」，得到折叠基线。
 
-    store 会重新分配 event_id（persist_feedback 的 event_id 是时间戳派生占位，
-    见其 docstring），两者不可直接比对，故按 (类型, 发生时间, book_id) 认最后一条。
+    优先按 event_id 精确剔除（id 由 store 返回，见 persist_feedback）；
+    只有在鸭子 store 不返回 id 时才退回「末条同形」启发式（#108 之前的行为）。
     """
+    wanted = _event_id_of(event)
+    if wanted is not None:
+        for index in range(len(events) - 1, -1, -1):
+            if _event_id_of(events[index]) == wanted:
+                return list(events[:index]) + list(events[index + 1:])
+    return _without_tail_lookalike(events, event)
+
+
+def _without_tail_lookalike(events, event):
+    """兜底：按 (类型, 发生时间, book_id) 认最后一条并剔除。"""
     if not events:
         return events
     last = events[-1]
@@ -252,7 +268,7 @@ def checkpoint_profile(store, event, *, config=None, now=None, config_fingerprin
     """
     events = list(store.read_events())
     prior = sum(1 for ev in events if _event_type_of(ev) == "profile_updated")
-    base = replace(rehydrate_from_events(_without_just_appended(events, event),
+    base = replace(rehydrate_from_events(_without_event(events, event),
                                          config=config, now=now), version=prior)
     profile = update_profile(base, event, config=config, now=now)
     return profile, persist_profile_snapshot(store, profile,
@@ -272,11 +288,10 @@ def record_feedback(kind, book_id, axis=None, value=1.0, store=None, now=None,
     result["profile"] = None
     result["profile_event_id"] = None
     if store is not None and kind in ("like", "dislike"):
-        # store 会重新分配 event_id（persist_feedback 里的 event_id 只是时间戳派生占位），
-        # 所以折叠落库后的那条事件：快照 high_water 才与重放口径一致。
-        events = list(store.read_events())
+        # 折叠「刚落库的那条事件」：persist_feedback 已把 store 分配的 event_id
+        # 写回 event，快照锚点不再依赖库尾读取（#108）。
         result["profile"], result["profile_event_id"] = checkpoint_profile(
-            store, events[-1] if events else result["event"], config=config,
+            store, result["event"], config=config,
             now=_coerce_now(now), config_fingerprint=config_fingerprint)
     return result
 
