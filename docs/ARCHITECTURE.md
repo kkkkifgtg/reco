@@ -2,14 +2,26 @@
 
 | 项 | 值 |
 |---|---|
-| 版本 | v1.1（按 docs/review/A2-findings.md 修订：F1–F5 阻断项 + 建议项 1–7 裁定；2026-11-20） |
-| 日期 | 2026-11-20 |
+| 版本 | v1.3（实现口径统稿；2026-11-25） |
+| 日期 | 2026-11-25 |
 | 作者 | 架构师（architect） |
-| 状态 | **未生效**。人审通过前不得写实现代码（见规格 team-and-research.md） |
+| 状态 | **已生效**。本文记录架构决策；与当前实现不一致处以「当前实现口径」为准 |
 | 范围 | 技术选型、7 包划分、四组模型、数据模型、接口签名、风险与退路 |
-| 写入范围 | 仅 docs/ARCHITECTURE.md；不 commit、不 git add |
 
 **本文件不含实现代码**：只出现函数名、参数名与返回形状，不出现函数体；确有歧义处的伪代码一律标注「仅示意」。文中 Windows 路径统一用 / 作分隔符（Windows API 等价接受）。
+
+---
+
+## 当前实现口径（2026-11-25）
+
+1. **生产向量**：`reco_io.extract` 使用字符 2–3gram 哈希桶计数、Top-64、L2 归一；没有调用 IDF。`feature_vectors.idf_version` 保留旧列名，当前写 `reco-ngram-counts/1`。`reco_core.vectorize` 的语料级 TF-IDF 是独立可用实现，不是当前生产入口。
+2. **正样本口径**：领域契约要求 liked 为已确认正样本；当前 `reco_store.recommend.rank_candidates` 仍把全部已存向量作为相似度质心输入，candidate 与推荐专区只被排除在候选域之外。这是尚未收敛的实现差异，本次统稿不改变推荐算法。
+3. **阅读器**：GUI 已内建 txt/md、EPUB、DOCX、PDF 阅读页；位置写入独立 `reading_progress` 表，行为信号写 `signal_recorded` 事件。§17 Q12 的「不内建」是历史裁定，已被后续实现取代。
+4. **阅读信号**：`dwell`、`completion`、`reopen` 参与画像行为折叠；`read_time` 当前只采集，不产生画像效应。
+5. **依赖**：以 `uv.lock` 与 `docs/DEPENDENCIES.md` 为准。jieba/pkuseg 是标签挖掘的可选分词器，不再适用早期「不引入 jieba」的依赖结论。
+6. **测试**：当前全仓基线为 `737 passed / 2 failed / 4 skipped`（2026-11-25，离屏模式）；两处失败均位于 `tests/test_extract_closed_loop.py`，为本次统稿之前既有的缺陷（与文档变更无关，另行跟踪）；历史验收与复盘中的 379/384 均是其当时快照。
+
+下文保留决策形成时的调研与论证；涉及上述六项的旧结论不覆盖本清单。
 
 ---
 
@@ -93,11 +105,11 @@
 |---|---|---|---|
 | reco-core | 共享数据类型、特征规整、**打分模型**、**画像模型** | score model、profile model | 无内部依赖 |
 | reco-store | SQLite schema、事件追加、投影重建、迁移 | 四模型的**持久化契约**（不含模型语义） | reco-core |
-| reco-labels | 标签体系（数据驱动）、alias 命中、合并/归档/提议 | **tag model** | reco-core |
+| reco-labels | 标签体系（数据驱动）、alias 命中、合并/归档/提议 | **tag model** | reco-core、reco-relations |
 | reco-relations | 关系图提取、逐字段人工覆盖、关系相似度 | **relation model** | reco-core |
 | reco-io | 目录扫描、增量判定、硬链接/复制落位、统计量提取 | 无（纯 IO 与统计） | reco-store、reco-labels、reco-relations |
 | reco-cli | 无界面入口、JSON 输出 | 无 | reco-core、reco-store、reco-io（仅公开 API） |
-| reco-ui | PyQt6 桌面入口 | 无 | reco-core、reco-store、reco-io（仅公开 API） |
+| reco-ui | PyQt6 桌面入口、阅读页 | 无 | reco-core、reco-store、reco-io、reco-labels（仅公开 API） |
 
 ### 4.2 依赖方向（单向，无环）
 
@@ -590,14 +602,14 @@ score = w_sim × 相似度 + w_model × 分类器输出 + w_behavior × 行为�
 | computed_at | TEXT | INDEX | — |
 | source_mtime_ns | INTEGER | — | 与 files 对齐，判断是否需重算 |
 
-**feature_vectors**（TF-IDF 向量，sparse 数值）
+**feature_vectors**（生产为字符 n-gram 哈希桶计数向量；core 另有可选 TF-IDF 实现）
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | book_id | INTEGER PK | — |
 | vector_blob | BLOB | 稀疏 (index, weight) 序列，数值 |
 | dim | INTEGER | 维度 |
-| idf_version | TEXT | IDF 快照版本（语料变化可重算） |
+| idf_version | TEXT | 历史列名；当前生产值 `reco-ngram-counts/1` 表示无 IDF |
 | norm | REAL | L2 范数（余弦用） |
 
 **tags / tag_aliases / book_tags**
@@ -821,17 +833,14 @@ score = w_sim × 相似度 + w_model × 分类器输出 + w_behavior × 行为�
 
 ## 12. 依赖管理与构建
 
-- 根 pyproject.toml：[tool.uv.workspace] members（7 包）+ [tool.uv.sources] workspace=true + [dependency-groups] dev=[pytest>=8.0]（已存在，F-13）。
-- 命令（Windows）：.venv/Scripts/uv.exe sync（装齐 7 包 + dev）；.venv/Scripts/uv.exe lock 更新锁。
-- 兜底（无 uv 或需独立安装）：逐包 pip install -e packages/reco-core 等；T0 已验证可行（F-2）。
-- 依赖声明归属（F1 修订）：**numpy / scipy / scikit-learn 声明在 reco-core**（相似度与评估的唯一使用方，含版本下限）；**PyQt6 声明在 reco-ui**（Qt 绑定只允许 reco_ui.qt 引用，§11.5）；pytest 在根 [dependency-groups]。评审实测：当前三处 pyproject 均未声明、.venv 内四个包全缺，必须补齐。
-- 安装步骤（首次需网络；实测 pypi 可达：scikit-learn 1.9.1、PyQt6 6.12.1）：① bootstrap 创建/复用 .venv 并装 uv+pytest → ② uv sync（或逐包 pip install -e）安装 numpy/scipy/scikit-learn 与 PyQt6 → ③ 锁定并记录版本（uv.lock / 锁文件）。**责任工单：新增「依赖落地」工单（声明 + 安装 + 版本记录），与本文档修订并行（队长裁定）**，对应 §16 T12。
-- 离线 wheel 缓存（F1 修订）：首次安装必须联网；安装后 pip download -d wheels/ 留存锁文件内 wheel（含 PyQt6-Qt6 运行库）；换机/重建用 pip install --no-index --find-links wheels/ 离线完成。
-- F-8 澄清（F1 修订）：§2 F-8 的「已在本机」指 **DSH 自带运行时**，不是本项目 .venv；不得据此跳过安装步骤。
-- 新增第三方依赖的准入：只允许「离线可用 + wheel 体积可控 + 无系统级服务」；每新增一个依赖必须在 §3 表里补一行。
-- 依赖清单（第一版）：scikit-learn（相似度/评估）、numpy（向量运算）——归 reco-core；PyQt6——归 reco-ui；pytest（dev）。**不引入**：torch、sentence-transformers、jieba、pandas。
+- 根 `pyproject.toml` 声明 7 包 workspace、workspace sources 与 dev 依赖；根 `uv.lock` 是安装版本的唯一锁定来源。
+- 命令（Windows）：`.venv/Scripts/uv.exe sync --frozen --inexact` 安装；`.venv/Scripts/uv.exe lock` 在依赖声明变化后更新锁文件。`scripts/bootstrap.ps1|sh` 使用同一同步命令。
+- 直接依赖归属：numpy/scipy/scikit-learn 在 reco-core；pypdf/zhconv 在 reco-io；PyQt6 在 reco-ui；pytest/python-docx 在根 dev group。jieba/pkuseg 是 reco-io 标签挖掘的可选分词器，未入锁，缺失时降级到内置字符 n-gram。
+- 当前锁定版本与 transitive dependencies 见 `docs/DEPENDENCIES.md`。不依赖 torch/sentence-transformers；句向量仍是 ADR-0004 的可选备选。
+- 首次安装需要访问包索引；`uv.lock` 不包含 wheel 文件，仓库不承诺离线重建。换机时使用锁文件重新下载，或由使用者另行准备完整离线缓存。
+- 新增第三方依赖时同步修改声明包、`uv.lock`、依赖清单与本节；不得把可选运行时依赖偷偷变成所有安装的必需项。
 - 解释器链（无系统 Python 时的解析顺序，建议项 1）：**RECO_PYTHON 环境变量 → DSH 自带运行时（F-1 路径）→ Windows py launcher → PATH 上的 python**；逐级探测、第一个可用者生效，全部失败时明确报错并指向 bootstrap；对应风险 R15。
-- scripts/bootstrap.ps1|sh 负责：创建/复用 .venv、装 uv+pytest、editable 安装 7 包、跑一次 pytest -q 冒烟；不得联网执行否则要显式提示。
+- `scripts/bootstrap.ps1|sh` 负责：创建/复用 `.venv`、安装 uv、按锁文件同步 workspace 与 dev 依赖、跑一次 `pytest -q` 冒烟；首次同步需要访问包索引。
 
 ---
 
@@ -948,7 +957,7 @@ score = w_sim × 相似度 + w_model × 分类器输出 + w_behavior × 行为�
 | Q9 | 单写者模型 | **WAL + 单写者队列 + 短事务 + busy_timeout**；GUI 常驻持有写队列、CLI 批处理串行获取写锁、读不受限 | 多实例并发需文件锁 + 「另一实例写入中」提示，v1 不做 |
 | Q10 | 中文 n-gram 参数 | analyzer=char、ngram_range=(2,3)、min_df=2、max_features=200000、sublinear_tf=True、**L2 归一** | 维度上限可下调（省内存、可能丢信息）；单字+bigram 可作对照实验 |
 | Q11 | 标签识别深度 | **已裁定（默认生效）**：v1 只做 alias 精确命中（可解释、可控） | 引入共现统计/相近度：召回更高但误报上升，须人工确认流程配套 |
-| Q12 | GUI 是否内建阅读器 | **不内建**（控范围、保首屏性能）；推荐专区详情只显示元数据与统计量 | 显示正文扩大 F1/F2 风险面；若将来做需处理坑 5（富文本整章渲染）与显示边界 |
+| Q12 | GUI 是否内建阅读器 | **已内建**（后续实现取代原「不内建」裁定）：txt/md、EPUB、DOCX、PDF；位置独立落表，行为信号进入事件流 | 阅读页通过后台读取与 QPlainTextEdit 渲染控制首屏成本；详情仍遵守正文不落日志/报告的边界 |
 | Q13 | 报告与日志字段 | **已裁定（默认生效）**：只打路径、统计量、标签名、分数；book_id 代替书名 | 如需书名：允许（F3），但禁止与正文片段同框 |
 
 ---

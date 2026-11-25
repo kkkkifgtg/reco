@@ -1,6 +1,6 @@
-# RETRO.md —— reco-impl 团队会话复盘（W14 收官，2026-11-21）
+# RETRO.md —— reco-impl 团队会话复盘（W14 历史快照，2026-11-21）
 
-> 目标：改环境不改代码。三收编：机械性错误→确定性脚本/检查；判断性取舍→编码规范；
+> 本文保留 W14 当时的环境与数字；当前测试基线见 `docs/ACCEPTANCE.md`。目标：改环境不改代码。三收编：机械性错误→确定性脚本/检查；判断性取舍→编码规范；
 > 工具链缺口→bootstrap 补齐项。规范正文见 docs/CODING-STANDARDS.md（8 条）。
 
 ## 1. 机械性错误 → 确定性检查（已收编 scripts/pre-commit-guard.sh）
@@ -47,6 +47,5 @@
 ## 5. 未竟事项（移交）
 
 - _last_status 多线程复核（归票 12）
-- 3 处 if False else 死分支（收尾票）
 - isolated-install.sh 升格 scripts/ 并入 CI（建议下一迭代）
 - uv/hatchling 离线补齐（bootstrap）

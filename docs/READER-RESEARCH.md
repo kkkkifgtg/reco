@@ -1,5 +1,7 @@
 # READER-RESEARCH —— 阅读器方案联网调研（RS1）
 
+> **历史调研快照（2026-11-21）**：本文记录阅读页实现前的方案比较，不是当前状态说明。当前实现与验收结果见 `docs/ARCHITECTURE.md`「当前实现口径」、`docs/ACCEPTANCE.md` 与 `packages/reco-ui/src/reco_ui/reader_page.py`。文中「尚未开发」「建议 DDL」「建议策略」均按当时语境阅读。
+
 > 日期：2026-11-21 ｜ 调研员：researcher（reco-reader 团队 t1/rs1）
 > 范围：**技术方案调研**（PyQt 长文渲染 / EPUB / DOCX / PDF / 进度记忆 / 自动标签策略）——不含任何小说内容。
 > 上下文：阅读页尚未开发（本仓为全新模块）；TXT/EPUB/MD/DOCX/PDF 的**特征提取读取器**已存在（reco-io `features._READERS`，路径→纯文本零落盘，tests/test_formats_w17.py:117-120），但那是打标签用的统计管，不是阅读页渲染管。性能预算：**10MB TXT 首帧 < 500ms** 且不阻塞主窗（列表双击打开阅读页，支持翻页/滚动与重开续读）。

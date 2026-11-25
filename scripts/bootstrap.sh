@@ -8,7 +8,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 VENV_DIR="$ROOT/.venv"
-PACKAGES=(reco-core reco-store reco-labels reco-relations reco-io reco-cli reco-ui)
 
 log() { printf '%s\n' "$*"; }
 
@@ -89,13 +88,8 @@ else
     log "[3/5] uv already installed in .venv"
 fi
 
-EDIT_ARGS=()
-for pkg in "${PACKAGES[@]}"; do
-    EDIT_ARGS+=(-e "packages/$pkg")
-done
-
-log "[4/5] Editable-installing 7 workspace packages"
-"$UV_BIN" pip install --python "$VENV_PY" --no-cache-dir "${EDIT_ARGS[@]}" 'pytest>=8.0'
+log "[4/5] Syncing the locked workspace and dev dependencies"
+"$UV_BIN" sync --frozen --inexact --python "$VENV_PY"
 
 log "[5/5] Running pytest (repo root)"
 "$VENV_PY" -m pytest
