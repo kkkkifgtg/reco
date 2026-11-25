@@ -15,13 +15,30 @@ __all__ = ["mine_alias_counts"]
 
 
 def mine_alias_counts(path, *, limit: int = 512) -> dict[str, int]:
-    """单本正文 → 候选标签词计数（词频 Top limit；不可读/不支持 → 诚实空字典）。"""
+    """单本正文 → 候选标签词计数（词频 Top limit；不可读/不支持 → 诚实空字典）。
+
+    #92：词条先做繁体→简体归一再计数——同一词的繁/简形态合并为同一候选，
+    避免繁体小说把同一标签拆成两个提案。
+    """
     text = _decode_text(Path(path))
     if not text:
         return {}
     from reco_io.tokenizer import top_words  # 延迟导入：本模块 import 零成本
 
-    return dict(top_words(text, limit=limit))
+    return merge_simplified_counts(dict(top_words(text, limit=limit)))
+
+
+def merge_simplified_counts(counts: dict[str, int]) -> dict[str, int]:
+    """繁/简同形合并：键 t2s 归一为简体，计数相加；单字丢弃（#92）。"""
+    from reco_io.t2s import to_simplified
+
+    merged: dict[str, int] = {}
+    for word, count in (counts or {}).items():
+        key = to_simplified(word)
+        if len(key) < 2:
+            continue
+        merged[key] = merged.get(key, 0) + count
+    return merged
 
 
 def _decode_text(path: Path) -> str:

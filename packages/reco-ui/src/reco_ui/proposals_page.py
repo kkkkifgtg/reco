@@ -12,6 +12,7 @@ from __future__ import annotations
 from reco_ui.qt import (
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QObject,
     QPushButton,
     QRunnable,
@@ -95,6 +96,12 @@ class ProposalsPage(QWidget):
         self._status = QLabel("待加载")
         self._status.setObjectName("dim")
         layout.addWidget(self._status)
+        # #90：关键词搜索——按候选词子串过滤（大小写不敏感，输入即有反馈）
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("搜索候选词…（即时过滤）")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.textChanged.connect(self.apply_search)
+        layout.addWidget(self.search_input)
         self._table = QTableWidget(0, 3)
         self._table.setHorizontalHeaderLabels(["候选词", "共现次数", "阈值"])
         layout.addWidget(self._table, 1)
@@ -137,15 +144,22 @@ class ProposalsPage(QWidget):
     def apply_rows(self, rows: list) -> None:
         """渲染行（UI 线程只渲染）。"""
         self._rows = list(rows)
-        self._table.setRowCount(len(self._rows))
-        for i, row in enumerate(self._rows):
+        self.apply_search()
+
+    def apply_search(self) -> None:
+        """按搜索框关键词过滤已加载提案（候选词子串，大小写不敏感；#90）。"""
+        keyword = self.search_input.text().strip().casefold()
+        hits = [r for r in self._rows
+                if keyword in str(r.get("candidate", "")).casefold()] if keyword else self._rows
+        self._table.setRowCount(len(hits))
+        for i, row in enumerate(hits):
             values = [str(row.get("candidate", "")), str(row.get("count", 0)),
                       str(row.get("threshold", 0))]
             for c, v in enumerate(values):
                 self._table.setItem(i, c, QTableWidgetItem(v))
         self.loaded = True
         if self._rows:
-            self._status.setText(f"待确认 {len(self._rows)} 条")
+            self._status.setText(f"待确认 {len(hits)} / 共 {len(self._rows)} 条")
             self.btn_accept.setEnabled(True)
             self.btn_reject.setEnabled(True)
         else:

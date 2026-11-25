@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -263,6 +264,14 @@ class ImportWorker(QRunnable):
                     "dedup_key": dedup_key(int(st.st_size), display),
                 }, occurred_at=_utcnow_iso(), config_fingerprint="gui/import/1", actor="user")
                 imported += 1
+                # #85：导入即打通 提取→挖掘→打标→(liked)画像折叠；失败不阻断导入
+                try:
+                    from reco_ui.tagging import process_book_for_profile
+
+                    process_book_for_profile(self._store, str(result.dst), self._zone,
+                                             now=_utcnow_iso())
+                except Exception as exc:
+                    print(f"warn: 导入打标失败 {display}: {exc}", file=sys.stderr)
             error = ""
         except Exception as exc:  # UI 只收字符串
             error = f"{type(exc).__name__}: {exc}"
@@ -314,14 +323,43 @@ class ScanWorker(QRunnable):
         _ACTIVE_IMPORTS.add(self)  # 复用扫描类 worker 持活注册表（生命周期同款）
 
     def run(self) -> None:
+        import time as _time
+
         from reco_ui.sync import sync_zone
 
         try:
+            since = _time.strftime("%Y-%m-%dT%H:%M:%S+00:00", _time.gmtime())
             result = sync_zone(self._store, self._zone, self._data_root,
                                stat_provider=self._stat_provider)
             self._emit(result.added, result.removed, result.moved, result.changed, "")
+            # #85：本轮触及的书接通画像（提取→挖掘→打标→仅 liked 折叠）
+            self._process_touched(since)
         except Exception as exc:  # UI 只收字符串
             self._emit(0, 0, 0, 0, f"{type(exc).__name__}: {exc}")
+
+    def _process_touched(self, since: str) -> None:
+        """对本轮同步触及（last_seen_at>=since）的书做画像接线；失败只 warn。"""
+        try:
+            from datetime import datetime, timezone
+
+            from reco_ui.tagging import process_book_for_profile
+
+            conn = self._store.read_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT DISTINCT book_id, path, zone FROM files"
+                    " WHERE zone = ? AND present = 1 AND book_id IS NOT NULL"
+                    " AND last_seen_at >= ?", (self._zone, since)).fetchall()
+            finally:
+                conn.close()
+            now = datetime.now(timezone.utc).isoformat()
+            for book_id, path, zone in rows:
+                try:
+                    process_book_for_profile(self._store, str(path), str(zone), now=now)
+                except Exception as exc:
+                    print(f"warn: 打标失败 book={book_id}: {exc}", file=sys.stderr)
+        except Exception as exc:
+            print(f"warn: 画像接线失败 zone={self._zone}: {exc}", file=sys.stderr)
 
     def _emit(self, added: int, removed: int, moved: int, changed: int, error: str) -> None:
         try:
@@ -680,7 +718,7 @@ class ZonePage(QWidget):
         layout.addWidget(title)
         # #76：搜索框——候选池默认只装 200 行，没有搜索就无法访问其余书
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("搜索书名…（回车过滤）")
+        self.search_input.setPlaceholderText("搜索书名/标签…（回车过滤）")
         self.search_input.setClearButtonEnabled(True)
         self.search_input.textChanged.connect(self.apply_search)
         layout.addWidget(self.search_input)
@@ -963,4 +1001,6 @@ def proposal_rows(store) -> list[dict]:
             "status": p.status,
             "created_at": p.created_at,
         })
+    # #90：顺序由 StoreAdapter.iter_proposals 的 SQL 保证（count 降序）——
+    # A6 静态守护：reco_ui 层零排序，排序一律在数据层完成。
     return rows

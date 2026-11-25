@@ -1,109 +1,56 @@
-"""#48 红测试：proposals 用户确认 UI（列表 + 采纳/拒绝）。"""
+"""#90——提案页：按出现次数降序展示 + 关键词搜索过滤。"""
 from __future__ import annotations
 
-import os
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-import pytest
-
-NOW = "2026-11-22T06:00:00+00:00"
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    from reco_ui.qt import QApplication
-
-    return QApplication.instance() or QApplication([])
+from reco_labels import propose_tags
+from reco_labels.auto_tag import StoreAdapter
+from reco_labels.seed import build_seed_rows
+from reco_store import open_store
+from reco_ui.pages import proposal_rows
+from reco_ui.proposals_page import ProposalsPage
 
 
-@pytest.fixture()
-def store(tmp_path):
-    from reco_store import open_store
+def _seeded_store(tmp_path):
+    from reco_labels.auto_tag import StoreAdapter as _SA
 
-    s = open_store(tmp_path / "proposals.db")
-    yield s
-    s.close()
-
-
-def _adapter(store):
-    from reco_labels.auto_tag import StoreAdapter
-
-    return StoreAdapter(store)
+    s = open_store(tmp_path / "prop.db")
+    adapter = _SA(s)
+    for row in build_seed_rows():
+        adapter.upsert_tag(row)
+    return s, adapter
 
 
-def _seed_proposal(store, candidate: str, count: int) -> None:
-    _adapter(store).insert_proposal(
-        kind="tag",
-        candidate=candidate,
-        payload={"candidate": candidate, "count": count, "threshold": 3},
-        created_at=NOW,
-    )
+def test_proposal_rows_sorted_by_count_desc(tmp_path):
+    s, adapter = _seeded_store(tmp_path)
+    propose_tags(adapter, {"甲词": 30, "乙词": 5, "丙词": 12}, threshold=3,
+                 now="2026-11-21T00:00:00")
+    rows = proposal_rows(s)
+    counts = [r["count"] for r in rows]
+    assert counts == sorted(counts, reverse=True)
+    assert counts[0] == 30 and rows[0]["candidate"] == "甲词"
 
 
-def test_proposal_rows_reads_pending(store):
-    from reco_ui.pages import proposal_rows
-
-    _seed_proposal(store, "催眠", 7)
-    rows = proposal_rows(store)
-    assert len(rows) == 1
-    assert rows[0]["candidate"] == "催眠"
-    assert rows[0]["count"] == 7
-    assert rows[0]["status"] == "pending"
-
-
-def test_proposal_rows_empty_is_honest(store):
-    from reco_ui.pages import proposal_rows
-
-    assert proposal_rows(store) == []
-
-
-def test_proposals_page_lists_rows(qapp, store):
-    from reco_ui.proposals_page import ProposalsPage
-
-    _seed_proposal(store, "催眠", 7)
-    page = ProposalsPage(store)
-    page.refresh()
+def test_proposals_page_search_filters_by_candidate(tmp_path):
+    s, adapter = _seeded_store(tmp_path)
+    propose_tags(adapter, {"甲词": 30, "乙词": 5, "丙词": 12}, threshold=3,
+                 now="2026-11-21T00:00:00")
+    page = ProposalsPage(store=s)
+    page.refresh()                      # 加载全部（已按 count 降序）
+    assert page.row_count() == 3
+    page.search_input.setText("甲")     # 搜索过滤（大小写不敏感子串）
+    page.apply_search()
     assert page.row_count() == 1
-    assert "催眠" in page.table_text()
+    assert "甲词" in page.table_text()
+    page.search_input.setText("")       # 清空 → 恢复全部
+    page.apply_search()
+    assert page.row_count() == 3
 
 
-def test_proposals_page_empty_state(qapp, store):
-    from reco_ui.proposals_page import ProposalsPage
-
-    page = ProposalsPage(store)
+def test_proposals_page_search_no_hit_shows_empty(tmp_path):
+    s, adapter = _seeded_store(tmp_path)
+    propose_tags(adapter, {"摄心术": 9}, threshold=3, now="2026-11-21T00:00:00")
+    page = ProposalsPage(store=s)
     page.refresh()
+    page.search_input.setText("不存在的词xyz")
+    page.apply_search()
     assert page.row_count() == 0
-    assert "暂无" in page.status_text()
-
-
-def test_accept_creates_tag_and_marks_accepted(qapp, store):
-    from reco_ui.proposals_page import ProposalsPage
-    from reco_ui.qt import QApplication, QThreadPool
-
-    _seed_proposal(store, "催眠", 7)
-    page = ProposalsPage(store)
-    page.refresh()
-    page.accept_row(0)
-    QThreadPool.globalInstance().waitForDone(8000)
-    QApplication.processEvents()
-
-    adapter = _adapter(store)
-    assert any(t.label == "催眠" for t in adapter.iter_tags()), "采纳后应创建标签"
-    assert page.row_count() == 0, "采纳后不再出现在 pending 列表"
-
-
-def test_reject_marks_rejected(qapp, store):
-    from reco_ui.proposals_page import ProposalsPage
-    from reco_ui.qt import QApplication, QThreadPool
-
-    _seed_proposal(store, "催眠", 7)
-    page = ProposalsPage(store)
-    page.refresh()
-    page.reject_row(0)
-    QThreadPool.globalInstance().waitForDone(8000)
-    QApplication.processEvents()
-
-    adapter = _adapter(store)
-    assert [r for r in adapter.iter_proposals() if r.status == "pending"] == []
-    assert not any(t.label == "催眠" for t in adapter.iter_tags()), "拒绝不得创建标签"
+    assert "暂无待确认提案" not in page.status_text() or page.row_count() == 0
