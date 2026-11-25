@@ -1,0 +1,39 @@
+name: tests
+
+# pytest 门禁：此前 11 项检查全是安全扫描，没有任何测试作业，
+# 红测试可以在 master 上躺两个月（见 #117）。
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      QT_QPA_PLATFORM: offscreen  # Qt 无显示环境（GUI 测试）
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Qt 运行时依赖
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libdbus-1-3
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: 按 uv.lock 安装（含全部工作区成员与 dev 组）
+        run: uv sync --frozen --all-packages
+      - name: 全仓测试
+        # jieba 是可选的「本机已装、未入锁」依赖；CI 走 ngram 兜底，
+        # 因此测试不得依赖具体分词结果（#117）。
+        run: uv run --frozen pytest packages tests -q
