@@ -330,13 +330,15 @@ def cmd_feedback(kind, *, db, book_id, axis=None, value=1.0) -> int:
     # 共用核心写入口（reco_core.feedback.record_feedback）：回执含 profile_event_id，
     # 说明本次是否落了画像版本快照（#71）。feedback_effects 仍供静音窗口计算。
     from reco_core.feedback import feedback_effects, record_feedback as _record_feedback
+    from reco_store.recommend import load_axis_ids
 
     with perf_span("cli.feedback"):
         store = open_store(db)
         try:
             now = datetime.now(timezone.utc)
             result = _record_feedback(kind, book_id=int(book_id), axis=axis,
-                                      value=value, store=store, now=now)
+                                      value=value, store=store, now=now,
+                                      axes=load_axis_ids(store))
             if kind == "add_to_pool":
                 print(json.dumps({"status": "ok", "kind": kind,
                                   "book_id": int(book_id)}, ensure_ascii=False))

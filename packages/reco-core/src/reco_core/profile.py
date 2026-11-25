@@ -150,6 +150,20 @@ def _resolve_config(config):
     return tiers, max_step, reason
 
 
+def _normalize_axes(axes) -> tuple[str, ...]:
+    """声明轴集归一：去空、去重、保序；字符串按单轴处理（不拆字符）。"""
+    if not axes:
+        return ()
+    if isinstance(axes, str):
+        axes = (axes,)
+    out: list[str] = []
+    for axis in axes:
+        text = str(axis).strip()
+        if text and text not in out:
+            out.append(text)
+    return tuple(out)
+
+
 def _axis_class(axis: str, tiers: Mapping[str, float]) -> float:
     """Q1 分档：stable(subject./relation.) 180d / signal 30d / 其余 tag 90d。"""
     if axis.startswith("subject.") or axis.startswith("relation."):
@@ -237,10 +251,12 @@ def _weight_triple(weight_set):
 class _Folder:
     """事件折叠状态：sums（Laplace 计数）与 disp（显示权重，clip 演化）分离。"""
 
-    def __init__(self, tiers, max_step, now_dt) -> None:
+    def __init__(self, tiers, max_step, now_dt, axes=()) -> None:
         self.tiers = tiers
         self.max_step = max_step
         self.now_dt = now_dt
+        self.declared_axes = _normalize_axes(axes)
+        self.n_axes = len(self.declared_axes)
         self.sums: dict[str, tuple[float, float]] = {}
         self.disp: dict[str, float] = {}
         self.behavior: dict[Any, float] = {}
@@ -306,15 +322,18 @@ class _Folder:
 
     # -- 从既有 ProfileData 恢复（update 路径；浮点经 dict 往返无损）
     @classmethod
-    def restore(cls, profile: "ProfileData", tiers, max_step, now_dt) -> "_Folder":
-        f = cls(tiers, max_step, now_dt)
-        per_axis = (profile.sample_counts or {}).get("per_axis", {})
+    def restore(cls, profile: "ProfileData", tiers, max_step, now_dt, axes=None) -> "_Folder":
+        f = cls(tiers, max_step, now_dt, axes if axes is not None else ())
+        counts = profile.sample_counts or {}
+        if axes is None:
+            f.n_axes = int(counts.get("n_axes", 0) or 0)
+        per_axis = counts.get("per_axis", {})
         for axis, pair in per_axis.items():
             f.sums[str(axis)] = (float(pair.get("positive", 0.0)), float(pair.get("negative", 0.0)))
         f.disp = {str(k): float(v) for k, v in (profile.axis_weights or {}).items()}
-        f.n_pos = int((profile.sample_counts or {}).get("tag_like", 0))
-        f.n_neg = int((profile.sample_counts or {}).get("tag_dislike", 0))
-        f.n_behavior = int((profile.sample_counts or {}).get("behavior", 0))
+        f.n_pos = int(counts.get("tag_like", 0))
+        f.n_neg = int(counts.get("tag_dislike", 0))
+        f.n_behavior = int(counts.get("behavior", 0))
         f.behavior = {k: float(v) for k, v in (profile.behavior_signals or {}).items()}
         f.high_water = profile.event_id_high_water
         f.gap = profile.completeness == "partial"
@@ -359,7 +378,7 @@ def merge_signal(event, config=None, now=None) -> list[dict]:
 def _confidence_from(n_pos: int, n_neg: int, n_axes: int, n_covered: int) -> Confidence:
     cap = 0.3 if n_pos < 10 else 1.0
     sample_factor = min(1.0, (n_pos + n_neg) / 40.0)
-    coverage = (n_covered / n_axes) if n_axes else 0.0
+    coverage = min(1.0, n_covered / n_axes) if n_axes else 0.0
     total = n_pos + n_neg
     consistency = (1.0 - abs(n_pos - n_neg) / total) if total else 0.0
     value = cap * (0.4 * sample_factor + 0.35 * coverage + 0.25 * consistency)
@@ -378,7 +397,8 @@ def profile_confidence(profile) -> Confidence:
     n_pos = int(counts.get("tag_like", 0))
     n_neg = int(counts.get("tag_dislike", 0))
     per_axis = counts.get("per_axis", {}) or {}
-    n_axes = len(per_axis)
+    # #110：优先用画像快照里的声明轴总数；旧快照没有该键时退回已见轴数。
+    n_axes = int(counts.get("n_axes", 0) or 0) or len(per_axis)
     n_covered = sum(1 for pair in per_axis.values() if pair.get("positive", 0) > 0 or pair.get("negative", 0) > 0)
     return _confidence_from(n_pos, n_neg, n_axes, n_covered)
 
@@ -388,14 +408,17 @@ def profile_confidence(profile) -> Confidence:
 def _assemble(folder: _Folder, version: int, now_dt: datetime, weight_triple, weight_version, weight_reason, fallback_reason, fingerprint: str) -> ProfileData:
     axis_weights = {axis: folder.disp[axis] for axis in sorted(folder.disp)}
     per_axis = {axis: {"positive": sp, "negative": sn} for axis, (sp, sn) in sorted(folder.sums.items())}
+    # #110：覆盖度分母是声明轴总数；未声明时退回「已见轴数」（旧口径，不放大）。
+    n_axes = folder.n_axes or len(per_axis)
     sample_counts = {
         "tag_like": folder.n_pos,
         "tag_dislike": folder.n_neg,
         "behavior": folder.n_behavior,
+        "n_axes": n_axes,
         "per_axis": per_axis,
     }
     top_tags = tuple(sorted(((axis, sp) for axis, (sp, _sn) in folder.sums.items()), key=lambda kv: (-kv[1], kv[0])))
-    conf = _confidence_from(folder.n_pos, folder.n_neg, len(per_axis), sum(1 for p in per_axis.values() if p["positive"] > 0 or p["negative"] > 0))
+    conf = _confidence_from(folder.n_pos, folder.n_neg, n_axes, sum(1 for p in per_axis.values() if p["positive"] > 0 or p["negative"] > 0))
     reason_parts = []
     if fallback_reason:
         reason_parts.append(fallback_reason)
@@ -442,23 +465,26 @@ def _assemble(folder: _Folder, version: int, now_dt: datetime, weight_triple, we
     )
 
 
-def build_profile(events, config=None, now=None, weight_set=None) -> ProfileData:
-    """全量折叠事件流 → 画像 v1（§6.4；E8 时钟由 now 注入）。"""
+def build_profile(events, config=None, now=None, weight_set=None, axes=None) -> ProfileData:
+    """全量折叠事件流 → 画像 v1（§6.4；E8 时钟由 now 注入）。
+
+    axes：分类法声明的全部轴（可选）；缺省时覆盖度退回已见轴数（旧口径）。
+    """
     now_dt = _coerce_now(now)
     tiers, max_step, fallback_reason = _resolve_config(config)
     triple, wver, wreason = _weight_triple(weight_set)
-    folder = _Folder(tiers, max_step, now_dt)
+    folder = _Folder(tiers, max_step, now_dt, axes)
     for ev in (events or []):
         folder.fold_event(ev, config)
     return _assemble(folder, 1, now_dt, triple, wver, wreason, fallback_reason, _config_fingerprint(config))
 
 
-def update_profile(profile, event, config=None, now=None, weight_set=None) -> ProfileData:
+def update_profile(profile, event, config=None, now=None, weight_set=None, axes=None) -> ProfileData:
     """增量单事件折叠 → 版本 +1（单事件影响上限 clip；§6.4）。"""
     now_dt = _coerce_now(now)
     tiers, max_step, fallback_reason = _resolve_config(config)
     triple, wver, wreason = _weight_triple(weight_set)
-    folder = _Folder.restore(profile, tiers, max_step, now_dt)
+    folder = _Folder.restore(profile, tiers, max_step, now_dt, axes)
     folder.fold_event(event, config)
     return _assemble(folder, int(profile.version) + 1, now_dt, triple, wver, wreason, fallback_reason, _config_fingerprint(config))
 
@@ -496,6 +522,8 @@ def export_profile(profile) -> dict:
             "tag_like": profile.sample_counts.get("tag_like", 0),
             "tag_dislike": profile.sample_counts.get("tag_dislike", 0),
             "behavior": profile.sample_counts.get("behavior", 0),
+            **(({"n_axes": profile.sample_counts["n_axes"]})
+               if "n_axes" in profile.sample_counts else {}),
             "per_axis": {k: dict(v) for k, v in profile.sample_counts.get("per_axis", {}).items()},
         },
         "top_tags": [{"axis": axis, "weight": w} for axis, w in profile.top_tags],
@@ -537,9 +565,9 @@ def axis_trends(profile_history) -> list:
     return out
 
 
-def verify_replay(events, stored, config=None, now=None) -> ReplayReport:
+def verify_replay(events, stored, config=None, now=None, axes=None) -> ReplayReport:
     """同流重建逐位比对（C2）：axis_weights 容差 1e-9；计数/版本/完整性/置信度必须相等。"""
-    rebuilt = build_profile(events, config=config, now=now)
+    rebuilt = build_profile(events, config=config, now=now, axes=axes)
     diffs = []
     stored_weights = _axis_weights_of(stored)
     for axis in set(stored_weights) | set(rebuilt.axis_weights):
@@ -563,6 +591,9 @@ def verify_replay(events, stored, config=None, now=None) -> ReplayReport:
     stored_conf_value = stored.get("confidence_value") if isinstance(stored, Mapping) else None
     if isinstance(stored_conf, Mapping):
         stored_conf_value = stored_conf.get("value")
+    elif stored_conf is not None:
+        # ProfileData 路径：Confidence 是 dataclass，不是 Mapping；旧实现因此漏比了置信度。
+        stored_conf_value = getattr(stored_conf, "value", None)
     if stored_conf_value is not None and abs(float(stored_conf_value) - rebuilt.confidence.value) > _REPLAY_TOL:
         diffs.append(f"confidence.value: {stored_conf_value!r} vs {rebuilt.confidence.value!r}")
     return ReplayReport(ok=not diffs, diffs=tuple(diffs))

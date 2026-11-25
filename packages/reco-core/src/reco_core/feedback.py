@@ -240,7 +240,7 @@ def _without_just_appended(events, event):
     return list(events[:-1]) if same else list(events)
 
 
-def checkpoint_profile(store, event, *, config=None, now=None, config_fingerprint=None):
+def checkpoint_profile(store, event, *, config=None, now=None, config_fingerprint=None, axes=None):
     """把「折叠 event 之后」的画像版本快照写回事件流（#71）。
 
     返回 (ProfileData, snapshot_event_id|None)。
@@ -253,14 +253,14 @@ def checkpoint_profile(store, event, *, config=None, now=None, config_fingerprin
     events = list(store.read_events())
     prior = sum(1 for ev in events if _event_type_of(ev) == "profile_updated")
     base = replace(rehydrate_from_events(_without_just_appended(events, event),
-                                         config=config, now=now), version=prior)
-    profile = update_profile(base, event, config=config, now=now)
+                                         config=config, now=now, axes=axes), version=prior)
+    profile = update_profile(base, event, config=config, now=now, axes=axes)
     return profile, persist_profile_snapshot(store, profile,
                                              config_fingerprint=config_fingerprint)
 
 
 def record_feedback(kind, book_id, axis=None, value=1.0, store=None, now=None,
-                    event_id=None, config=None, config_fingerprint=None):
+                    event_id=None, config=None, config_fingerprint=None, axes=None):
     """反馈写入口（CLI/GUI 共用）：落反馈事件 + 画像版本快照（#71）。
 
     在 persist_feedback 之上补一步：like/dislike 折叠进画像后把 profile_updated
@@ -277,13 +277,16 @@ def record_feedback(kind, book_id, axis=None, value=1.0, store=None, now=None,
         events = list(store.read_events())
         result["profile"], result["profile_event_id"] = checkpoint_profile(
             store, events[-1] if events else result["event"], config=config,
-            now=_coerce_now(now), config_fingerprint=config_fingerprint)
+            now=_coerce_now(now), config_fingerprint=config_fingerprint, axes=axes)
     return result
 
 
-def rehydrate_from_events(events, config=None, now=None):
-    """口味事件流 → 画像（W9 build_profile 同流重建；重放基线恒 v1，C2）。"""
-    return build_profile(events, config=config, now=now)
+def rehydrate_from_events(events, config=None, now=None, axes=None):
+    """口味事件流 → 画像（W9 build_profile 同流重建；重放基线恒 v1，C2）。
+
+    axes：分类法声明的全部轴，供覆盖度分母使用；缺省时退回已见轴数。
+    """
+    return build_profile(events, config=config, now=now, axes=axes)
 
 
 def _normalize_mute(mute):
