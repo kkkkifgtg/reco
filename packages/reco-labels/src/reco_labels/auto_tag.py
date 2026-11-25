@@ -334,8 +334,9 @@ class StoreAdapter:
 class AutoTagOutcome:
     """一次自动打标的完整摘要（数值/枚举/标签 id——B 类，无正文）。
 
-    zone 裁定内嵌：AutoTagOutcome.ZONES 只含 liked；非 liked 一律 zero-out
-    （skipped=True），不写 book_tags、不产提议。
+    zone 裁定内嵌：AutoTagOutcome.ZONES = liked + candidate（#83：candidate 也打标）；
+    两者之外的专区一律 zero-out（skipped=True），不写 book_tags、不产提议。画像折叠
+    （tag_hit）仅对 liked 落，见 tag_book_and_fold。
     """
 
     ZONES = ("liked", "candidate")  # 触发专区白名单（#83：candidate 也打标；画像折叠仅 liked）
