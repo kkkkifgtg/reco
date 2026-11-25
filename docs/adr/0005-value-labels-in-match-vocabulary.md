@@ -4,6 +4,8 @@ Status: accepted
 
 #83 证实：匹配词表只含 tag_id+aliases（种子 164 行仅 1 个真实词语别名）导致 163 个值标签永不命中——book_tags 6/1530、画像只剩单轴，自动打标名存实亡。决定：值行（tag_id 含 "."）的显示名（len≥2 且含 CJK）进入身份/匹配词表（taxonomy.match_keys，aliases_for_match 与之同源）；正文经分词器（jieba，可选依赖，ngram 兜底）挖出的未知高频词仍走 proposals(pending) 待用户确认，其中与既有匹配词仅差一字的谐音/形近变体走 kind=alias 提案挂到原标签；采纳的别名并入既有别名表（追加，不整体替换）。单字与纯 ASCII 显示名不作为子串探针（精度护栏），仍走人工/别名路径。
 
+2026-11-23 追加裁定：candidate 专区书籍同样自动打标（报告人指令，1529 本）。防污染边界不变——`tag_hit` 画像事件仅对 liked 落，candidate 的 `book_tags(source=auto)` 仅供展示与人工确认，不折叠进 `axis_weights`；推荐专区等其他 zone 仍拒绝。
+
 ## Considered Options
 
 - 维持「显示名不参与」（Q11 原裁定）：身份稳定（改 label 不影响历史匹配），但词表饥饿使自动打标失效，与报告人「书应有标签」直接冲突。否决；历史 basis_json 固化命中词串，改显示名只影响其后的匹配。
