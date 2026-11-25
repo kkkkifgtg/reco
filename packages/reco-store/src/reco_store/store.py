@@ -140,7 +140,17 @@ def _validate_payload(payload: dict) -> str:
             raise PayloadViolationError(f"payload 含白名单外键: {key!r}")
         if val is None:
             continue
-        if isinstance(val, (str, int, float, bool)):
+        if isinstance(val, int) and not isinstance(val, bool):
+            # #107：Windows 的 st_dev/st_ino 是无符号 64 位，超出 SQLite 有符号
+            # int64 时 sqlite3 会抛裸 OverflowError（事件整体回滚、无上下文）。
+            # 编码层统一拒绝，并指向唯一的编码函数。
+            if not -(2**63) <= val < 2**63:
+                raise PayloadViolationError(
+                    f"payload 整数超出 int64: {key!r}={val}；"
+                    "无符号 64 位身份请先用 reco_io.int64.to_int64 编码"
+                )
+            continue
+        if isinstance(val, (str, float, bool)):
             continue
         # RR2/t3：唯一例外 aliases——标量字符串数组（种子别名一体落库），
         # 其余键仍必须为标量（B6 白名单纪律不放松）。

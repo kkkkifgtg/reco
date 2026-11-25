@@ -257,8 +257,8 @@ class ImportWorker(QRunnable):
                     "mtime_ns": int(st.st_mtime_ns),
                     # N1：Windows 无符号 64 位身份 → SQLite int64（补码回绕契约），
                     # 与 resync/导入/种子同一编码口径（契约测试 test_int64_contract）。
-                    "st_dev": to_int64(int(st.st_dev)),
-                    "st_ino": to_int64(int(st.st_ino)),
+                    "st_dev": _encoded_identity(st)[0],
+                    "st_ino": _encoded_identity(st)[1],
                     "display_name": display,
                     "normalized_name": normalize_book_name(display),
                     "dedup_key": dedup_key(int(st.st_size), display),
@@ -615,6 +615,17 @@ def move_file_across_zones(src: Path, dst_dir: Path, dst_zone: str) -> Path:
     return dst
 
 
+def _stat_identity(path):
+    """读文件身份（注入接缝：测试用假 stat 模拟超界 inode）。"""
+    return path.stat()
+
+
+def _encoded_identity(st) -> tuple[int, int]:
+    """身份编码唯一口：Windows 无符号 64 位 → SQLite 有符号 int64（#107）。"""
+    from reco_io.int64 import to_int64
+
+    return to_int64(int(st.st_dev)), to_int64(int(st.st_ino))
+
 def move_book_to_liked(
     store: Store,
     src_path,
@@ -656,14 +667,14 @@ def move_book_to_liked(
     dst_dir = _makedirs_zone(data_root, "liked")
     if src.parent == dst_dir:
         return src  # 已在 liked：幂等 no-op（不重复移动、不落事件）
-    st = src.stat()  # 源必须真实存在；缺失直接抛（诚实失败）
+    st = _stat_identity(src)  # 源必须真实存在；缺失直接抛（诚实失败）
     dst = move_file_across_zones(src, dst_dir, "liked")
     if not os.environ.get("RECO_DISABLE_MOVE_EVENT"):  # 逆向验证开关（默认关）
         store.append_event("file_moved", payload={
             "path": str(src),
             "new_path": str(dst),
             "zone": "liked",
-            "st_ino": int(st.st_ino),
+            "st_ino": _encoded_identity(st)[1],
         }, occurred_at=_utcnow_iso(), config_fingerprint="gui/move/1", actor="user")
     return dst
 
