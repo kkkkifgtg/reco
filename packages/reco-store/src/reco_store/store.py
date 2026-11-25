@@ -193,7 +193,8 @@ CREATE TABLE IF NOT EXISTS files(
   last_seen_at TEXT NOT NULL,
   moved_from_path TEXT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uq_files_present ON files(volume_id, st_ino) WHERE present = 1;
+-- #97：同 inode 多路径（硬链接孪生）是合法形态，身份不唯一；路径唯一性由 files.path 承担。
+CREATE INDEX IF NOT EXISTS ix_files_identity ON files(volume_id, st_ino) WHERE present = 1;
 CREATE INDEX IF NOT EXISTS ix_files_zone ON files(zone, present);
 CREATE INDEX IF NOT EXISTS ix_files_book ON files(book_id);
 
@@ -635,6 +636,8 @@ class Store:
         self.write_conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         _configure(self.write_conn, writer=True)
         self.write_conn.executescript(SCHEMA_SQL)
+        # 老库迁移：身份唯一索引会把硬链接孪生判成冲突（#97），幂等拆除。
+        self.write_conn.execute("DROP INDEX IF EXISTS uq_files_present")
         row = self.write_conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
         if row is None:
             self.write_conn.executemany(
