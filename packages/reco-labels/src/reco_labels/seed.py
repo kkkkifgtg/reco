@@ -5,7 +5,8 @@
 10+5+6+5+7 ｜ 4+3+4+6+4 ｜ 5+7+4 ｜ 3+3+4 = 164 行含 6 域行）。
 唯一 alias：mech.hypnosis ←「精神控制/洗脑/mind control」（规格 JSON 示例逐字）。
 层级：值行 parent=轴行 id（如 mech）；轴行 parent=域行 id（d1…d6）；
-域行 parent=None。created_at 统一 2026-11-20（确定性）。
+域行 parent=None。created_at 统一 2026-11-20（静态数据包的时间是内容，
+不是事件发生时刻；事件时间一律走 reco_labels.clock.resolve）。
 """
 from __future__ import annotations
 

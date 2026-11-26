@@ -23,10 +23,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Iterable, Mapping
 
+from reco_labels.clock import now_iso
 from reco_labels.match import TagHit, match_tags
 from reco_labels.taxonomy import match_keys
 from reco_labels.proposals import propose_alias_tags, propose_tags, variant_alias_candidates
@@ -45,15 +45,6 @@ _EVENTS_FOLDED_ELSEWHERE = frozenset({
     "tag_created", "tag_proposed", "proposal_accepted", "proposal_rejected",
     "tag_conflict",
 })
-
-
-def _now_iso() -> str:
-    """提案状态事件的 occurred_at 兜底（协议签名不带时间戳时）：UTC 秒级。
-
-    重放照事件里记录的 occurred_at 逐位回放，写一次即永久固定——不影响确定性；
-    与 reco_store.store._now_iso 同一口径（此处不 import store：§4.2 依赖方向）。
-    """
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 class StoreAdapter:
@@ -161,7 +152,7 @@ class StoreAdapter:
             payload["aliases"] = [str(a) for a in row.aliases]
         self._store.append_event(
             "tag_added", payload=payload,
-            occurred_at=row.created_at, config_fingerprint="rr2/adapter/1",
+            occurred_at=row.created_at, config_fingerprint=_ADAPTER_FP,
         )
 
     def record_book_tag(self, book_id: int, tag_id: str, *, source: str,
@@ -171,7 +162,7 @@ class StoreAdapter:
             payload={"tag_id": str(tag_id), "source": str(source),
                      "confidence": float(confidence), "basis_json": str(basis_json)},
             book_id=int(book_id), occurred_at=updated_at,
-            config_fingerprint="rr2/adapter/1",
+            config_fingerprint=_ADAPTER_FP,
         )
 
     def redirect_book_tag_rows(self, source_tag: str, target_tag: str) -> int:
@@ -309,7 +300,7 @@ class StoreAdapter:
         self._store.append_event(
             "proposal_updated", book_id=None,
             payload={"proposal_id": pid, "status": str(status)},
-            occurred_at=_now_iso(), config_fingerprint=_ADAPTER_FP,
+            occurred_at=now_iso(), config_fingerprint=_ADAPTER_FP,
         )
 
 
