@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+from reco_core.axes import AXIS_PREFIX
+
 from reco_labels.store import SeedRow
 
 SEED_DATE = "2026-11-20"
@@ -59,16 +61,7 @@ _SPEC: tuple[tuple[str, str, tuple[tuple[str, tuple[str, ...]], ...]], ...] = (
     )),
 )
 
-# 轴名 → 轴缩写（tag_id 前缀；避免跨轴歧义，取轴名前缀去 vowel 或惯用缩写）
-_AXIS_PREFIX: dict[str, str] = {
-    "topology": "top", "power": "pow", "consent": "cons", "evolution": "evo",
-    "role": "role", "body": "body", "archetype": "arch", "age": "age", "species": "spec",
-    "mechanism": "mech", "coercion": "coer", "transformation": "trans",
-    "body_part": "bpart", "setting": "set",
-    "explicitness": "expl", "pov": "pov", "length": "len", "style": "style", "pace": "pace",
-    "ending": "end", "tone": "tone", "emotion_arc": "emo",
-    "language": "lang", "completion": "comp", "quality_flag": "qual",
-}
+# 轴前缀表来自 reco_core.axes（#99：seed/extract/explain 共用一张表）
 
 # 规格唯一 alias 示例（逐字）：mech.hypnosis
 _SEED_ALIASES: dict[str, tuple[str, ...]] = {
@@ -104,7 +97,7 @@ def build_seed_rows() -> tuple[SeedRow, ...]:
         ))
         seen_ids.add(domain_id)
         for axis_name, values in axes:
-            prefix = _AXIS_PREFIX[axis_name]
+            prefix = AXIS_PREFIX[axis_name]
             axis_id = prefix
             if axis_id in seen_ids:
                 raise ValueError(f"轴 id 冲突: {axis_id}")

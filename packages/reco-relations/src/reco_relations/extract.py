@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from reco_core.axes import AXIS_PREFIX, axis_of_prefix
+
 from .graph import empty_graph
 
 DEFAULT_EVIDENCE_FLOOR = 0.35
@@ -59,25 +61,22 @@ _EVOLUTION_MAP = {
 }
 
 # 本模型认识的前缀（其余交给标签/画像模型，不入关系依据）
+# 消费键 = 规范化后的轴全称；rel 是 §6.1 的边类型前缀，没有同名 seed 轴，
+# 单独保留（生产 seed 不产 rel.*，见 explain 的说明）。
 _KNOWN_PREFIXES = frozenset(
-    ("role", "age", "archetype", "body", "rel", "mech", "consent", "topology", "power", "evolution")
+    ("role", "age", "archetype", "body", "rel", "mechanism", "consent",
+     "topology", "power", "evolution")
 )
 
-# 标签 id 前缀 → 维度名：真实 seed 用缩写（top./cons./pow./evo./arch.），
-# 代码内部用全称。修复前不认缩写，导致 6/8 维度收不到任何标签（issue #68）。
-_PREFIX_ALIASES = {
-    "top": "topology",
-    "cons": "consent",
-    "pow": "power",
-    "evo": "evolution",
-    "arch": "archetype",
-}
+# 标签 id 前缀 → 维度名：真实 seed 用缩写（top./cons./pow./evo./arch.），代码内部
+# 用全称。映射来自 reco_core.axes（#99），不再手抄——修复前不认缩写，导致 6/8
+# 维度收不到任何标签（#68）。未知前缀原样返回，交给 _KNOWN_PREFIXES 过滤。
 
 
 def _dimension_of(tag_id: str) -> str:
     """标签 id → 维度名：把缩写前缀规范化为全称（role./age. 等本就一致）。"""
     prefix = tag_id.split(".", 1)[0] if "." in tag_id else ""
-    return _PREFIX_ALIASES.get(prefix, prefix)
+    return axis_of_prefix(prefix) or prefix
 
 
 def _is_number(value: Any) -> bool:
@@ -178,7 +177,7 @@ def extract_relation_graph(
             edge["type"] = _EDGE_TYPE_MAP[rel]
         # 维度 5：mechanism（过阈值者，按标签 id 排序）
         edge["mechanism"] = sorted(
-            tag_id for tag_id, w in consumed.get("mech", {}).items() if w >= floor
+            tag_id for tag_id, w in consumed.get("mechanism", {}).items() if w >= floor
         )
         # 维度 6：intensity（仅来自合法统计量；越界留空不钳位）
         intensity = stats.get("edge_intensity")
