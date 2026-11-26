@@ -20,6 +20,8 @@ import struct
 from datetime import datetime, timezone
 from typing import Any
 
+from .rank_id import format_rank_book_id
+
 __all__ = [
     "decode_vector_blob",
     "load_book_names",
@@ -114,7 +116,7 @@ def load_book_names(store) -> dict[str, str]:
         rows = conn.execute("SELECT book_id, display_name FROM books ORDER BY book_id").fetchall()
     finally:
         conn.close()
-    return {f"b{int(r[0])}": str(r[1]) for r in rows}
+    return {format_rank_book_id(r[0]): str(r[1]) for r in rows}
 
 
 def load_eval_samples(store) -> list[tuple[str, str, int]]:
@@ -128,7 +130,7 @@ def load_eval_samples(store) -> list[tuple[str, str, int]]:
         ).fetchall()
     finally:
         conn.close()
-    return [(f"b{int(r[0])}", str(r[1]), 1 if r[2] == "liked" else 0) for r in rows]
+    return [(format_rank_book_id(r[0]), str(r[1]), 1 if r[2] == "liked" else 0) for r in rows]
 
 
 def load_profile(store):
@@ -179,7 +181,7 @@ def rank_candidates(store, config=None) -> dict:
     books = load_books(store)  # 全库身份：正样本向量口径（liked 仍参与正样本）
     candidate_books = load_candidate_books(store)  # 候选域：candidate 专区
     candidates = [
-        (f"b{bid}", {"dedup_key": key, "vector": vectors.get(bid, {})})
+        (format_rank_book_id(bid), {"dedup_key": key, "vector": vectors.get(bid, {})})
         for bid, key in candidate_books
     ]
     positive_vectors = tuple(
@@ -242,4 +244,3 @@ def persist_rank_run(store, out, *, now: str, actor: str,
         actor=str(actor),
     )
     return str(run_id)
-

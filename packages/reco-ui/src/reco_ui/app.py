@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 from reco_io.perf import perf_span
+from reco_store.rank_id import parse_rank_book_id
 from reco_ui.qt import (
     QAbstractItemView,
     QApplication,
@@ -695,10 +696,9 @@ class RecommendPage(QWidget):
         raw = self._model.book_id_at(row)
         if raw is None:
             return
-        # rank 输出书号名空间为 "b<N>"，转真实整数 book_id
-        try:
-            book_id = int(str(raw).lstrip("b"))
-        except ValueError:
+        # rank 输出书号名空间为 "b<N>"，转真实整数 book_id（解析唯一处：reco_store.rank_id）
+        book_id = self._parse_rank_book_id(raw)
+        if book_id is None:
             self._status.setText(f"无法打开：书号无法解析（{raw}）")
             return
         path = self._rec_source_path(book_id)
@@ -755,15 +755,11 @@ class RecommendPage(QWidget):
     def _parse_rank_book_id(raw) -> int | None:
         """rank 书号 "b<N>" → 整数 book_id；无法解析返回 None。
 
-        三按钮（不合口味/标为喜欢/加入候选池）共用同一解析，避免各自实现漂移
+        解析实现唯一处是 reco_store.rank_id.parse_rank_book_id（#105）：UI 三个入口
+        （双击打开 / 反馈按钮 / 标签提示）与 CLI 共用，避免各自 lstrip("b") 漂移
         （#72 的根因就是 _move_liked 有 lstrip、_feedback 没有）。
         """
-        text = str(raw).strip()
-        digits = text[1:] if text[:1] in ("b", "B") else text
-        try:
-            return int(digits)
-        except (TypeError, ValueError):
-            return None
+        return parse_rank_book_id(raw)
 
     def _feedback(self, kind: str, axis) -> None:
         """发起反馈：写库投递线程池（UI 线程零阻塞，§11.1）；连点防护=反馈侧 in-flight 去重（坑 2）。

@@ -25,6 +25,7 @@ from typing import Any
 from reco_io.perf import perf_span
 from reco_io.scanner import scan_zones
 from reco_store import open_store
+from reco_store.rank_id import format_rank_book_id
 
 __all__ = [
     "cmd_eval",
@@ -408,15 +409,16 @@ def cmd_explain(db, *, book_id) -> int:
                 return 1
             bid, key = row
             try:
-                reasons = explain([(f"b{bid}", {})],  # score 向量契约：纯 {dim:weight}
-                                  profile, f"b{bid}")
+                rank_id = format_rank_book_id(bid)
+                reasons = explain([(rank_id, {})],  # score 向量契约：纯 {dim:weight}
+                                  profile, rank_id)
                 status = "ok"
             except ValueError:
                 # §6.3：特征缺失跳过不静默当 0 分——如实报「无可解释依据」不崩
                 reasons = []
                 status = "no_features"
             payload = {
-                "book_id": f"b{bid}",
+                "book_id": format_rank_book_id(bid),
                 "status": status,
                 "reasons": [{"axis": r.axis, "contribution": float(r.contribution),
                              "source": r.source} for r in reasons],

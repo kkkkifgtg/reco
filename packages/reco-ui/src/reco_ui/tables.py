@@ -6,6 +6,7 @@ GUI 侧零排序：模型只按 rank() 的输出顺序逐行渲染（§10）；
 """
 from __future__ import annotations
 
+from reco_store.rank_id import parse_rank_book_id
 from reco_ui.qt import (
     QAbstractTableModel,
     QModelIndex,
@@ -52,10 +53,9 @@ class RankTableModel(QAbstractTableModel):
             # #66：悬停显示该书标签（与专区页一致）
             if not (0 <= index.row() < len(self._rows)):
                 return None
-            raw = str(self._rows[index.row()].book_id)
-            try:
-                book_id = int(raw.lstrip("b"))
-            except ValueError:
+            # 解析唯一处：reco_store.rank_id.parse_rank_book_id（#105）
+            book_id = parse_rank_book_id(self._rows[index.row()].book_id)
+            if book_id is None:
                 return None
             provider = getattr(self, "tag_provider", None)
             labels = provider(book_id) if provider is not None else []
