@@ -700,7 +700,9 @@ class ReaderPage(QWidget):
         self._set_feedback_buttons_enabled(False)
         from reco_ui.pages import FeedbackWorker
 
-        worker = FeedbackWorker(self._store, "dislike", self._book_id, axis="tag")
+        # #101：不再写死 axis="tag"（分类法里没这个轴）——由 reco_store.feedback
+        # 按书的标签推导主导轴，UI 只表达「不合口味」这个意图。
+        worker = FeedbackWorker(self._store, "dislike", self._book_id)
         worker.signals.done.connect(self._on_dislike_done)
         QThreadPool.globalInstance().start(worker)
 

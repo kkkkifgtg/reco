@@ -41,7 +41,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("kind", choices=["dislike", "like", "add_to_pool"])
     p.add_argument("--db", required=True)
     p.add_argument("--book-id", required=True)
-    p.add_argument("--axis", default=None)
+    p.add_argument("--axis", default=None,
+                   help="覆盖自动推导的轴（默认按书的标签取主导轴）")
     p.add_argument("--value", type=float, default=1.0)
 
     p = sub.add_parser("unmute", help="人工解除静音（提前放出该书）")

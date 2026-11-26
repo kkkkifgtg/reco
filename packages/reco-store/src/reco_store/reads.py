@@ -11,6 +11,7 @@ from __future__ import annotations
 
 __all__ = [
     "dedup_key_of",
+    "dominant_axis_for_book",
     "book_id_by_path",
     "count_present_in_zone",
     "first_present_file",
@@ -165,3 +166,23 @@ def dedup_key_of(store, book_id: int) -> str | None:
     """书的去重键（静音行携带；书不存在回 None，不抛）。"""
     row = _fetch(store, "SELECT dedup_key FROM books WHERE book_id = ?", (int(book_id),))
     return row[0][0] if row else None
+
+
+def dominant_axis_for_book(store, book_id: int) -> str | None:
+    """书的「主导标签轴」：按标签行数降序、同数按最高置信度降序。
+
+    #101 残余：反馈的 axis 过去有三个来源——UI 写死 ``"tag"``、CLI 让用户传、
+    core 缺省退化成 ``"unknown"``。同一规则三处猜，画像里就会出现不存在于
+    分类法的轴。这里给出唯一推导：书有标签就取行数最多的轴；没有标签回 None，
+    由调用方决定「无轴可归」的诚实降级（dislike 拒绝，like 记 unknown）。
+    """
+    rows = _fetch(store,
+        "SELECT t.axis, COUNT(*) AS n, MAX(bt.confidence) AS c"
+        " FROM book_tags bt JOIN tags t ON t.tag_id = bt.tag_id"
+        " WHERE bt.book_id = ? AND t.axis IS NOT NULL AND t.axis != ''"
+        " GROUP BY t.axis"
+        " ORDER BY n DESC, c DESC, t.axis ASC"
+        " LIMIT 1",
+        (int(book_id),),
+    )
+    return str(rows[0][0]) if rows else None
