@@ -1,22 +1,18 @@
 """GUI 反馈与数据 glue（工单 12 切片 2）。
 
 原则：GUI 不造第二条写路径——全部落库经 reco_store.Store 单写者队列；
-静音窗口复用 reco_core.feedback.feedback_effects（与 CLI 同一套契约）；
+静音窗口与文案由 reco_store.feedback 统一完成（与 CLI 同一个入口，不各写一遍）；
 ui_usage 与口味事件流严格隔离（C12，本模块不触碰 ui_usage）。
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from reco_core.feedback import feedback_effects, record_feedback as _record_feedback
 from reco_store import Store, dedup_key, normalize_book_name
 from reco_store.reads import count_present_in_zone, zone_page
 
 GUI_SEED_FP = "gui/seed/1"
 GUI_FEEDBACK_FP = "gui/feedback/1"
-
-_VALID_KINDS = ("dislike", "like", "add_to_pool")
-
 
 def _coerce_now(now) -> datetime:
     if now is None:
@@ -77,49 +73,16 @@ def zone_rows(store: Store, zone: str, *, limit: int = 200,
     return out
 
 
-def _dedup_of(store: Store, book_id: int) -> str | None:
-    conn = store.read_conn()
-    try:
-        row = conn.execute("SELECT dedup_key FROM books WHERE book_id = ?", (book_id,)).fetchone()
-    finally:
-        conn.close()
-    return row[0] if row else None
-
-
 def record_feedback(store: Store, kind: str, book_id, axis=None, value=1.0, now=None) -> int:
-    """三按钮唯一写入口：persist_feedback（append-only）+ dislike 静音窗口落库。
+    """三按钮唯一写入口（委托 reco_store.feedback）：返回 event_id。
 
-    dislike/like → rec_feedback（口味事件流）；add_to_pool → pool_added（不折叠）。
-    返回 event_id。不触碰 ui_usage（C12）。
+    静音窗、文案、画像快照都在那个入口里完成——GUI 不再自己编排一遍（#101）。
     """
-    if kind not in _VALID_KINDS:
-        raise ValueError(f"未知反馈类型: {kind!r}（允许 {_VALID_KINDS}）")
-    now_dt = _coerce_now(now)
-    book = int(book_id)
-    # 共用写入口：除反馈事件外还折叠画像并落 profile_versions 快照（#71）。
-    result = _record_feedback(kind, book_id=book, axis=axis, value=value,
-                              store=store, now=now_dt)
-    event_id = int(result["event"]["event_id"])
-    if kind == "dislike":
-        effects = feedback_effects(
-            {"event_type": "rec_feedback", "event_id": event_id,
-             "occurred_at": now_dt.isoformat(),
-             "payload": {"axis": axis, "kind": kind, "value": float(value)},
-             "book_id": book},
-            now=now_dt)
-        window = effects.get("mute_window")
-        if window is not None:
-            store.record_mute(
-                book,
-                dedup_key=_dedup_of(store, book),
-                axis=str(axis),
-                kind="dislike",
-                expired_at=str(window.expired_at),
-                remaining_days=float(window.remaining_days),
-                occurred_at=now_dt.isoformat(),
-                config_fingerprint=GUI_FEEDBACK_FP,
-            )
-    return event_id
+    from reco_store.feedback import record_feedback as _store_record
+
+    receipt = _store_record(store, kind, int(book_id), axis=axis, value=value,
+                            now=_coerce_now(now), config_fingerprint=GUI_FEEDBACK_FP)
+    return int(receipt["event_id"])
 
 def zone_meta(store: Store, zone: str, *, limit: int = 200) -> dict:
     """专区元信息：总数与是否被截断（#75 静默截断修复）。

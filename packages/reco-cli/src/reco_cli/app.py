@@ -312,53 +312,22 @@ def cmd_recommend(db, *, as_json=True, persist=False) -> int:
 # ---------------------------------------------------------------- feedback
 
 def cmd_feedback(kind, *, db, book_id, axis=None, value=1.0) -> int:
-    """反馈入口：add_to_pool → pool_added；dislike/like → rec_feedback + 静音落库。"""
-    # 共用核心写入口（reco_core.feedback.record_feedback）：回执含 profile_event_id，
-    # 说明本次是否落了画像版本快照（#71）。feedback_effects 仍供静音窗口计算。
-    from reco_core.feedback import feedback_effects, record_feedback as _record_feedback
+    """反馈入口：写库与静音编排全在 reco_store.feedback，这里只渲染回执。"""
+    from reco_store.feedback import record_feedback as _record_feedback
 
     with perf_span("cli.feedback"):
         store = open_store(db)
         try:
-            now = datetime.now(timezone.utc)
-            result = _record_feedback(kind, book_id=int(book_id), axis=axis,
-                                      value=value, store=store, now=now)
+            receipt = _record_feedback(store, kind, int(book_id), axis=axis,
+                                       value=value, now=datetime.now(timezone.utc))
             if kind == "add_to_pool":
                 print(json.dumps({"status": "ok", "kind": kind,
                                   "book_id": int(book_id)}, ensure_ascii=False))
                 return 0
-            profile = _load_profile(store)
-            effects = feedback_effects(
-                {"event_type": "rec_feedback", "event_id": result["event"]["event_id"],
-                 "occurred_at": now.isoformat(),
-                 "payload": {"axis": axis, "kind": kind, "value": float(value)},
-                 "book_id": int(book_id)},
-                now=now)
-            if kind == "dislike":
-                window = effects.get("mute_window")
-                if window is not None:
-                    store.record_mute(
-                        int(book_id),
-                        dedup_key=_dedup_key_of(store, int(book_id)),
-                        axis=str(axis), kind="dislike",
-                        expired_at=str(window.expired_at),
-                        remaining_days=float(window.remaining_days),
-                        occurred_at=now.isoformat(),
-                        config_fingerprint="cli/feedback/1",
-                    )
-            print(effects["display"])  # C7 文案透传（已调整：X 维度权重已下调/上调）
+            print(receipt["display"])  # C7 文案透传（已调整：X 维度权重已下调/上调）
             return 0
         finally:
             store.close()
-
-
-def _dedup_key_of(store, book_id: int) -> str | None:
-    conn = store.read_conn()
-    try:
-        row = conn.execute("SELECT dedup_key FROM books WHERE book_id = ?", (book_id,)).fetchone()
-    finally:
-        conn.close()
-    return row[0] if row else None
 
 
 # ---------------------------------------------------------------- explain

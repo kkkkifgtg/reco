@@ -10,6 +10,7 @@ UI/CLI 过去各自手写 FROM files：口径（present=1、book_id 非空、fil
 from __future__ import annotations
 
 __all__ = [
+    "dedup_key_of",
     "book_id_by_path",
     "count_present_in_zone",
     "first_present_file",
@@ -158,3 +159,9 @@ def zone_page(store, zone: str, *, keyword: str | None = None, limit: int = 200,
         (int(bid), str(name), int(size), frozenset(others.get(int(bid)) or ()))
         for bid, name, size in raw
     ]
+
+
+def dedup_key_of(store, book_id: int) -> str | None:
+    """书的去重键（静音行携带；书不存在回 None，不抛）。"""
+    row = _fetch(store, "SELECT dedup_key FROM books WHERE book_id = ?", (int(book_id),))
+    return row[0][0] if row else None

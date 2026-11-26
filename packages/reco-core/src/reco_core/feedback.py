@@ -369,9 +369,10 @@ def _score_feedback_aware(candidate_features, profile, config=None, mute_by_key=
     signals = dict(getattr(profile, "behavior_signals", None) or {})
     weights = (w_sim, w_model, w_behavior)
     if muted_ids:
-        w_behavior_view = w_behavior + 0.05 * w_sim
-        w_sim_view = w_sim - 0.05 * w_sim
-        w_sim_view = w_sim - 0.05 * w_sim
+        # 95/5 分配：把写死的 0.05 换成 _MUTE_KEEP，份额与常量同源
+        # （#101：同一算术不再手抄两遍，也不再改比例漏改一处）。
+        w_behavior_view = w_behavior + _MUTE_KEEP * w_sim
+        w_sim_view = w_sim - _MUTE_KEEP * w_sim
         weights = (w_sim_view, w_model, w_behavior_view)
         if w_behavior_view > 0 and w_sim > 0:
             sims = dict(score_similarity(candidates, tuple(positive_vectors or ())))
