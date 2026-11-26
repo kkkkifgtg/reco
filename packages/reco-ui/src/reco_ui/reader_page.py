@@ -41,6 +41,7 @@ from reco_ui.qt import (
 )
 from reco_ui.reader import ReaderError, chunk_text, load_book_text, parse_epub_spine
 from reco_ui.reader_signals import SIGNAL_SOURCE, ReadingSession
+from reco_store.reads import first_present_file
 
 __all__ = ["ReaderLoadSignals", "ReaderLoadWorker", "ReaderPage",
            "ReaderLikeMoveSignals", "ReaderLikeMoveWorker",
@@ -192,18 +193,8 @@ class ReaderLikeMoveWorker(QRunnable):
 
     def _lookup_source(self):
         """(path, zone) 候选源；优先 candidate 行，其次任意现存专区行。"""
-        conn = self._store.read_conn()
-        try:
-            row = conn.execute(
-                "SELECT path, zone FROM files WHERE book_id = ? AND present = 1"
-                " AND zone = 'candidate' LIMIT 1", (self._book_id,)).fetchone()
-            if row is None:
-                row = conn.execute(
-                    "SELECT path, zone FROM files WHERE book_id = ? AND present = 1"
-                    " ORDER BY file_id LIMIT 1", (self._book_id,)).fetchone()
-        finally:
-            conn.close()
-        return (str(row[0]), str(row[1])) if row is not None else None
+        return (first_present_file(self._store, self._book_id, zone="candidate")
+                or first_present_file(self._store, self._book_id))
 
     def _emit(self, ok: bool, moved: bool, error: str) -> None:
         try:

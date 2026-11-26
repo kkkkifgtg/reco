@@ -26,6 +26,7 @@ from reco_io.perf import perf_span
 from reco_io.scanner import scan_zones
 from reco_store import open_store
 from reco_store.rank_id import format_rank_book_id
+from reco_store.reads import present_book_zones, present_files
 
 __all__ = [
     "cmd_eval",
@@ -137,18 +138,9 @@ _EXTRACT_OK_FLAGS = frozenset({"ok", "empty", "oversized_streamed"})
 
 def _present_files_by_book(store) -> dict[int, list[tuple[str, int]]]:
     """present=1 文件行按 book_id 分组（同书可多条；book_id 序 → 确定性处理次序）。"""
-    conn = store.read_conn()
-    try:
-        rows = conn.execute(
-            "SELECT book_id, path, size_bytes FROM files"
-            " WHERE present = 1 AND book_id IS NOT NULL"
-            " ORDER BY book_id, path"
-        ).fetchall()
-    finally:
-        conn.close()
     groups: dict[int, list[tuple[str, int]]] = {}
-    for book_id, path, size_bytes in rows:
-        groups.setdefault(int(book_id), []).append((str(path), int(size_bytes)))
+    for book_id, path, size_bytes in present_files(store):
+        groups.setdefault(book_id, []).append((path, size_bytes))
     return groups
 
 
@@ -166,16 +158,9 @@ def _pick_extract_file(files: list[tuple[str, int]]) -> str | None:
 
 def _book_zones(store) -> dict[int, set[str]]:
     """book_id → 出现过的专区集合（files 投影；双区同书两侧都算）。"""
-    conn = store.read_conn()
-    try:
-        rows = conn.execute(
-            "SELECT book_id, zone FROM files WHERE present = 1 AND book_id IS NOT NULL"
-        ).fetchall()
-    finally:
-        conn.close()
     zones: dict[int, set[str]] = {}
-    for book_id, zone in rows:
-        zones.setdefault(int(book_id), set()).add(str(zone or ""))
+    for book_id, zone in present_book_zones(store):
+        zones.setdefault(book_id, set()).add(zone)
     return zones
 
 

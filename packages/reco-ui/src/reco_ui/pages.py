@@ -26,6 +26,12 @@ import time
 from pathlib import Path
 
 from reco_io.perf import perf_span
+from reco_store.reads import (
+    book_id_by_path,
+    first_present_path,
+    present_files_in_zone,
+    source_row,
+)
 from reco_ui.qt import (
     QAbstractTableModel,
     QHBoxLayout,
@@ -344,14 +350,7 @@ class ScanWorker(QRunnable):
 
             from reco_ui.tagging import process_book_for_profile
 
-            conn = self._store.read_conn()
-            try:
-                rows = conn.execute(
-                    "SELECT DISTINCT book_id, path, zone FROM files"
-                    " WHERE zone = ? AND present = 1 AND book_id IS NOT NULL"
-                    " AND last_seen_at >= ?", (self._zone, since)).fetchall()
-            finally:
-                conn.close()
+            rows = present_files_in_zone(self._store, self._zone, since=since)
             now = datetime.now(timezone.utc).isoformat()
             for book_id, path, zone in rows:
                 try:
@@ -526,18 +525,8 @@ class BookSourceWorker(QRunnable):
 
     def _lookup_source(self, book_id: int) -> tuple[str, str]:
         """本专区该书的（现存路径, 书名）；无 files(present=1) 行 → 空路径（不猜名字映射）。"""
-        conn = self._store.read_conn()
-        try:
-            row = conn.execute(
-                "SELECT f.path, b.display_name FROM files f"
-                " LEFT JOIN books b ON b.book_id = f.book_id"
-                " WHERE f.book_id = ? AND f.zone = ? AND f.present = 1"
-                " ORDER BY f.file_id LIMIT 1", (int(book_id), self._zone)).fetchone()
-        finally:
-            conn.close()
-        if row is None:
-            return "", ""
-        return str(row[0]), ("" if row[1] is None else str(row[1]))
+        found = source_row(self._store, book_id, self._zone)
+        return ("", "") if found is None else found
 
     def _emit(self, book_id: int, path: str, name: str, error: str) -> None:
         try:
@@ -653,14 +642,7 @@ def move_book_to_liked(
                         if Path(str(r[1])).name == src.name), None)
     else:
         # 显式给书号时仍要核实源文件确实在 from_zone 内（不猜、不越区移动）
-        conn = store.read_conn()
-        try:
-            row = conn.execute(
-                "SELECT book_id FROM files WHERE path = ? AND zone = ? AND present = 1"
-                " LIMIT 1", (str(src), from_zone)).fetchone()
-        finally:
-            conn.close()
-        if row is None:
+        if book_id_by_path(store, str(src), zone=from_zone) is None:
             return src  # 源不在 from_zone（已移走/重复点击）：no-op 防护
     if book_id is None:
         return src  # 源不在 from_zone（已移走/重复点击）：no-op 防护
@@ -785,14 +767,7 @@ class ZonePage(QWidget):
         """本专区该书的现存路径；无 files(present=1) 行 → None（不猜名字映射）。"""
         if self._store is None:
             return None
-        conn = self._store.read_conn()
-        try:
-            row = conn.execute(
-                "SELECT path FROM files WHERE book_id = ? AND zone = ? AND present = 1"
-                " ORDER BY file_id LIMIT 1", (int(book_id), self.zone)).fetchone()
-        finally:
-            conn.close()
-        return str(row[0]) if row is not None else None
+        return first_present_path(self._store, book_id, zone=self.zone)
 
     def _on_double_clicked(self, index) -> None:
         """双击行 → reader_requested(path, book_id)；行已失效/无源文件只报状态。

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from reco_core.feedback import feedback_effects, record_feedback as _record_feedback
 from reco_store import Store, dedup_key, normalize_book_name
+from reco_store.reads import count_present_in_zone, zone_page
 
 GUI_SEED_FP = "gui/seed/1"
 GUI_FEEDBACK_FP = "gui/feedback/1"
@@ -65,49 +66,14 @@ def zone_rows(store: Store, zone: str, *, limit: int = 200,
     此时在备注列标注「另见：<其他专区>」，让用户看得见、自己决定；
     **不删除任何文件、不改变 book 归属**（擅自处理用户文件风险过高）。
     """
-    conn = store.read_conn()
-    try:
-        # #76：keyword 走 SQL LIKE，因此能命中 limit 之外的书（不只是已加载的 200 行）
-        kw = (keyword or "").strip()
-        where = "f.zone = ? AND f.present = 1"
-        params: list = [zone]
-        if kw:
-            # #91：关键词同时命中书名与标签（标签显示名/tag_id 子串）——按标签筛选书籍
-            where += (" AND (b.display_name LIKE ? OR EXISTS ("
-                      "SELECT 1 FROM book_tags bt JOIN tags t ON t.tag_id = bt.tag_id"
-                      " WHERE bt.book_id = b.book_id"
-                      " AND (t.label LIKE ? OR t.tag_id LIKE ?)))")
-            params += ["%" + kw + "%", "%" + kw + "%", "%" + kw + "%"]
-        raw = conn.execute(
-            "SELECT b.book_id, b.display_name, b.size_bytes"
-            " FROM files f JOIN books b ON b.book_id = f.book_id"
-            f" WHERE {where}"
-            " ORDER BY b.book_id LIMIT ? OFFSET ?",
-            (*params, int(limit), int(max(0, offset))),
-        ).fetchall()
-        # 该页所有 book_id 在其他专区的分布
-        ids = [int(r[0]) for r in raw]
-        others: dict[int, set[str]] = {}
-        if ids:
-            marks = ",".join("?" * len(ids))
-            for bid, z in conn.execute(
-                f"SELECT DISTINCT book_id, zone FROM files"
-                f" WHERE present = 1 AND zone <> ? AND book_id IN ({marks})",
-                (zone, *ids),
-            ).fetchall():
-                others.setdefault(int(bid), set()).add(str(z))
-    finally:
-        conn.close()
-
+    rows = zone_page(store, zone, keyword=keyword, limit=limit, offset=offset)
     out: list[tuple] = []
-    for r in raw:
-        bid = int(r[0])
-        zones = others.get(bid) or set()
+    for bid, name, size, zones in rows:
         note = ""
         if zones:
             names = "、".join(_ZONE_DISPLAY.get(z, z) for z in sorted(zones))
             note = f"另见：{names}"
-        out.append((bid, str(r[1]), int(r[2]), note))
+        out.append((bid, name, size, note))
     return out
 
 
@@ -161,13 +127,7 @@ def zone_meta(store: Store, zone: str, *, limit: int = 200) -> dict:
     修复前用户看到 200 行却不知库里还有 1329 本；这里给出 {total, shown, truncated}，
     界面据此显示「显示 200 / 共 1529」。
     """
-    conn = store.read_conn()
-    try:
-        total = int(conn.execute(
-            "SELECT COUNT(*) FROM files WHERE zone = ? AND present = 1", (zone,)
-        ).fetchone()[0])
-    finally:
-        conn.close()
+    total = count_present_in_zone(store, zone)
     shown = min(total, int(limit))
     return {"zone": str(zone), "total": total, "shown": shown,
             "truncated": total > shown, "limit": int(limit)}

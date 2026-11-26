@@ -9,17 +9,12 @@
 """
 from __future__ import annotations
 
+from reco_store.reads import book_id_by_path as _book_id_by_path
+
 
 def book_id_by_path(store, path: str) -> int | None:
     """files 投影按路径查 book_id（present=1）；查不到返回 None（诚实跳过）。"""
-    conn = store.read_conn()
-    try:
-        row = conn.execute(
-            "SELECT book_id FROM files WHERE path = ? AND present = 1"
-            " AND book_id IS NOT NULL LIMIT 1", (str(path),)).fetchone()
-    finally:
-        conn.close()
-    return int(row[0]) if row is not None else None
+    return _book_id_by_path(store, path)
 
 
 def process_book_for_profile(store, path: str, zone: str, *, now: str) -> dict:

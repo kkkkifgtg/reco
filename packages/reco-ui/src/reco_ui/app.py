@@ -11,6 +11,7 @@ from pathlib import Path
 
 from reco_io.perf import perf_span
 from reco_store.rank_id import parse_rank_book_id
+from reco_store.reads import first_present_path
 from reco_ui.qt import (
     QAbstractItemView,
     QApplication,
@@ -677,16 +678,7 @@ class RecommendPage(QWidget):
         """推荐专区该书的现存路径（库内 files 行）；无则回退 data_root/推荐专区/书名。"""
         if self._store is None:
             return ""
-        conn = self._store.read_conn()
-        try:
-            row = conn.execute(
-                "SELECT path FROM files WHERE book_id = ? AND present = 1"
-                " ORDER BY file_id LIMIT 1", (int(book_id),)).fetchone()
-        finally:
-            conn.close()
-        if row is not None:
-            return str(row[0])
-        return ""
+        return first_present_path(self._store, book_id) or ""
 
     def _on_double_clicked(self, index) -> None:
         """双击推荐行 → 打开阅读页；行失效/源缺失时状态栏诚实提示（不静默）。"""

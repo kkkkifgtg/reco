@@ -33,6 +33,7 @@ from reco_io.int64 import from_int64, to_int64
 from reco_io.scanner import scan_zones
 from reco_io.perf import perf_span
 from reco_store import Store, dedup_key, normalize_book_name
+from reco_store.reads import zone_file_identities
 
 # GUI 再扫描落库口径（config_fingerprint 留痕；扫描/导入/种子各有前缀不混流）
 SYNC_SCAN_FP = "gui/resync/1"
@@ -61,18 +62,9 @@ def _fingerprints(result) -> tuple:
 
 def _zone_history(store: Store, zone: str) -> dict[str, tuple[int, int, int, int]]:
     """本专区 present=1 前史：path → (dev, ino, size, mtime_ns)（身份域无符号）。"""
-    conn = store.read_conn()
-    try:
-        rows = conn.execute(
-            "SELECT path, st_dev, st_ino, size_bytes, mtime_ns FROM files"
-            " WHERE zone = ? AND present = 1",
-            (zone,),
-        ).fetchall()
-    finally:
-        conn.close()
     history: dict[str, tuple[int, int, int, int]] = {}
-    for path, st_dev, st_ino, size, mtime in rows:
-        history[str(path)] = (
+    for path, st_dev, st_ino, size, mtime in zone_file_identities(store, zone):
+        history[path] = (
             from_int64(int(st_dev)),  # db 侧 int64 → 无符号（配对域）
             from_int64(int(st_ino)),
             int(size),
