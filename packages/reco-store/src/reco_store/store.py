@@ -498,8 +498,12 @@ def _apply_event(conn: sqlite3.Connection, event: Event) -> None:
     elif t == "label_set":
         _apply_label_set(conn, event.book_id, p, at)
     elif t == "label_cleared":
-        conn.execute("DELETE FROM book_tags WHERE book_id = ? AND tag_id = ? AND source = 'auto'",
-                     (event.book_id, p["tag_id"]))  # F2：只清 auto 行；manual/user 双保护
+        # F2：默认只清 auto 行（manual/user 双保护）；#121 允许 payload 带 source
+        # 指定清哪一种来源——GUI 得能撤销自己贴错的 user 行。缺省保持旧语义，
+        # 无 source 的历史事件重放逐位不变。
+        src = str(p.get("source") or "auto")
+        conn.execute("DELETE FROM book_tags WHERE book_id = ? AND tag_id = ? AND source = ?",
+                     (event.book_id, p["tag_id"], src))
     elif t == "signal_recorded":
         conn.execute(
             "INSERT INTO signals(book_id, kind, value, occurred_at, source, session_id) VALUES(?,?,?,?,?,?)",

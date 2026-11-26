@@ -23,14 +23,19 @@ from __future__ import annotations
 import os
 import sys
 import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from reco_io.perf import perf_span
 from reco_ui.qt import (
     QAbstractTableModel,
+    QDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMenu,
     QModelIndex,
     QObject,
@@ -736,6 +741,9 @@ class ZonePage(QWidget):
             self._model.tag_provider = _tags_of
         self._table.setModel(self._model)
         self._table.doubleClicked.connect(self._on_double_clicked)  # RR1 T5：双击进阅读页
+        # #121：书行右键——「编辑标签…」是唯一入口（build_context_menu 之前是死代码）
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._on_context_menu)
         layout.addWidget(self._table, 1)
         self._status = QLabel("待加载")
         self._status.setObjectName("dim")
@@ -937,16 +945,48 @@ class ZonePage(QWidget):
     def row_count(self) -> int:
         return self._model.rowCount()
 
-    def build_context_menu(self) -> QMenu:
+    def build_context_menu(self, book_id: int | None = None) -> QMenu:
         """每次新构建（不缓存实例 → 无悬挂 QMenu，坑 7 幂等）。
 
-        #80：「标为喜欢」「不合口味」已移到阅读界面，列表层不再提供这两个入口；
-        候选池专区因此没有可用动作（空菜单），喜欢专区保留「移到候选池」。
+        #80：「标为喜欢」「不合口味」已移到阅读界面，列表层不再提供这两个入口。
+        #121：接上右键菜单，只挂真正有实现的动作——原先的「移到候选池」自 #80
+        起没有任何 handler，菜单本身也无人调用（死代码），不在这条修复里复活它。
         """
         menu = QMenu(self)
-        if self.zone != "candidate":
-            menu.addAction("移到候选池")
+        if book_id is not None:
+            menu.addAction("编辑标签…")
         return menu
+
+    def _book_id_at_pos(self, pos) -> int | None:
+        index = self._table.indexAt(pos)
+        if index is None or not index.isValid():
+            return None
+        return self._model.book_id_at(index.row())
+
+    def _on_context_menu(self, pos) -> None:
+        """右键：取行 → 建菜单 → 执行所选动作（#121）。"""
+        book_id = self._book_id_at_pos(pos)
+        if book_id is None:
+            return
+        menu = self.build_context_menu(book_id)
+        chosen = menu.exec(self._table.viewport().mapToGlobal(pos))
+        if chosen is not None and chosen.text() == "编辑标签…":
+            self.open_tag_editor(book_id)
+
+    def open_tag_editor(self, book_id: int) -> None:
+        """打开「编辑标签」对话框并把改动落库（#121）。
+
+        写入仍走 store.append_event（UI 层零第二条写路径）；悬停 tooltip 每次
+        现查库，所以保存后下一帧即反映新标签，无需刷新整页。
+        """
+        if self._store is None:
+            return
+        try:
+            outcome = run_tag_editor(self._store, book_id, parent=self)
+        except Exception as exc:  # 写失败不装成功：状态行如实报
+            self._status.setText(f"标签保存失败：{exc}")
+            return
+        self._status.setText(tag_edit_status(outcome))
 
 
 # ---------------------------------------------------------------- 标签悬停（#66）
@@ -975,6 +1015,175 @@ def book_tags_display(store, book_id: int) -> list[str]:
             out.append(name)
     return out
 
+
+# ---------------------------------------------------------------- 标签编辑（#121）
+@dataclass(frozen=True)
+class TagEditChoice:
+    """对话框一行：一个标签 + 这本书当前的来源（None = 还没贴）。"""
+
+    tag_id: str
+    label: str
+    source: str | None
+    removable: bool  # manual 行：人工权威，界面不许删
+
+
+@dataclass(frozen=True)
+class TagEditOutcome:
+    """一次编辑的结果：加了什么、删了什么、哪些被拒。"""
+
+    added: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+    blocked: tuple[str, ...] = ()
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def tag_edit_choices(store, book_id: int) -> list[TagEditChoice]:
+    """编辑标签的数据源：全部标签 × 这本书当前的来源。
+
+    裁定（#121）：manual 行（非 GUI 来源的人工权威）在界面只读——用户要能
+    撤销自己贴错的标签，但不该能绕过别处写下的人工结论；auto 与 user 可删。
+    """
+    if store is None:
+        return []
+    conn = store.read_conn()
+    try:
+        tags = conn.execute("SELECT tag_id, label FROM tags ORDER BY tag_id").fetchall()
+        on_book = {
+            str(tag_id): str(source)
+            for tag_id, source in conn.execute(
+                "SELECT tag_id, source FROM book_tags WHERE book_id = ?", (int(book_id),))
+        }
+    except Exception:
+        return []
+    finally:
+        conn.close()
+    out: list[TagEditChoice] = []
+    for tag_id, label in tags:
+        tid = str(tag_id)
+        src = on_book.get(tid)
+        name = str(label) if label else tid
+        out.append(TagEditChoice(tag_id=tid, label=name, source=src,
+                                 removable=src != "manual"))
+    return out
+
+
+def apply_tag_edits(store, book_id: int, *, add=(), remove=(),
+                    now: str | None = None) -> TagEditOutcome:
+    """把一次「编辑标签」落成事件（#121）：加 = user 行，删 = 该来源的 cleared。
+
+    加：source="user"——人工权威，写入层双保护保证后续 auto 覆盖不了。
+    删：auto / user 放行；manual 拒绝并原样保留（人工优先不该被自己绕过）。
+    """
+    at = now or _now_iso()
+    current = {c.tag_id: c for c in tag_edit_choices(store, book_id)}
+    added: list[str] = []
+    removed: list[str] = []
+    blocked: list[str] = []
+    for tag_id in dict.fromkeys(str(t) for t in add):
+        choice = current.get(tag_id)
+        if not tag_id or (choice is not None and choice.source == "user"):
+            continue  # 已贴上的人工行：重复确认不算改动
+        store.append_event(
+            "label_set",
+            payload={"tag_id": tag_id, "source": "user", "confidence": 1.0,
+                     "basis_json": '{"kind":"manual_edit"}'},
+            book_id=int(book_id), occurred_at=at, config_fingerprint="ui/tags/1", actor="user",
+        )
+        added.append(tag_id)
+    for tag_id in dict.fromkeys(str(t) for t in remove):
+        choice = current.get(tag_id)
+        if choice is None or choice.source is None:
+            continue
+        if not choice.removable:
+            blocked.append(tag_id)
+            continue
+        store.append_event(
+            "label_cleared",
+            payload={"tag_id": tag_id, "source": choice.source},
+            book_id=int(book_id), occurred_at=at, config_fingerprint="ui/tags/1", actor="user",
+        )
+        removed.append(tag_id)
+    return TagEditOutcome(added=tuple(added), removed=tuple(removed), blocked=tuple(blocked))
+
+
+def run_tag_editor(store, book_id: int, *, parent=None) -> "TagEditOutcome | None":
+    """打开「编辑标签」对话框并把改动落库；取消返回 None（#121）。"""
+    dialog = TagEditDialog(store, book_id, parent=parent)
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        return None
+    return apply_tag_edits(store, book_id, add=dialog.added(), remove=dialog.removed())
+
+
+def tag_edit_status(outcome: "TagEditOutcome | None") -> str:
+    """把一次编辑结果写成状态行文案（manual 被拒要如实说出来）。"""
+    if outcome is None:
+        return "标签无变化"
+    parts = []
+    if outcome.added:
+        parts.append(f"加 {len(outcome.added)}")
+    if outcome.removed:
+        parts.append(f"删 {len(outcome.removed)}")
+    if outcome.blocked:
+        parts.append(f"{len(outcome.blocked)} 个 manual 标签不可删")
+    return "标签已更新：" + "，".join(parts) if parts else "标签无变化"
+
+
+class TagEditDialog(QDialog):
+    """#121：一本书的标签增删（勾选 = 贴在这本书上）。
+
+    manual 行以禁用项呈现（带「人工·不可删」标注）：能看见、不能动——
+    把驳回藏在保存后的报错里，会让用户以为删成功了。
+    """
+
+    def __init__(self, store, book_id: int, parent=None) -> None:
+        super().__init__(parent)
+        self._book_id = int(book_id)
+        self._initial: dict[str, str | None] = {}
+        self.setWindowTitle("编辑标签")
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("勾选 = 贴上该标签；取消勾选 = 删除"))
+        self._list = QListWidget()
+        for choice in tag_edit_choices(store, book_id):
+            suffix = ("（自动）" if choice.source == "auto"
+                      else "（人工·不可删）" if choice.source == "manual" else "")
+            item = QListWidgetItem(choice.label + suffix)
+            item.setData(Qt.ItemDataRole.UserRole, choice.tag_id)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if choice.source else Qt.CheckState.Unchecked)
+            if not choice.removable:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+            self._initial[choice.tag_id] = choice.source
+            self._list.addItem(item)
+        layout.addWidget(self._list, 1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self._btn_cancel = QPushButton("取消")
+        self._btn_cancel.clicked.connect(self.reject)
+        row.addWidget(self._btn_cancel)
+        self._btn_ok = QPushButton("保存")
+        self._btn_ok.setObjectName("primary")
+        self._btn_ok.clicked.connect(self.accept)
+        row.addWidget(self._btn_ok)
+        layout.addLayout(row)
+
+    def _checked(self) -> set[str]:
+        out: set[str] = set()
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                out.add(str(item.data(Qt.ItemDataRole.UserRole)))
+        return out
+
+    def added(self) -> tuple[str, ...]:
+        now = self._checked()
+        return tuple(sorted(t for t in now if self._initial.get(t) is None))
+
+    def removed(self) -> tuple[str, ...]:
+        now = self._checked()
+        return tuple(sorted(t for t, src in self._initial.items() if src and t not in now))
 
 # ---------------------------------------------------------------- proposals 待确认（#48）
 def proposal_rows(store) -> list[dict]:
