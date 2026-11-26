@@ -96,6 +96,29 @@ def test_edit_adds_user_tag_and_shows_in_tooltip(store, tmp_path):
     assert "纯爱" in book_tags_display(store, book_id)
 
 
+
+
+def test_adding_over_auto_tag_upgrades_row_to_user(store, tmp_path):
+    """自动贴错了：用户确认同一条 → 该行升级为 user（从此 auto 不得再覆盖）。"""
+    from reco_ui.pages import apply_tag_edits
+
+    book_id = _落书(store, tmp_path)
+    _加标签(store, book_id, "mech.催眠术", "催眠术", source="auto")
+
+    outcome = apply_tag_edits(store, book_id, add=("mech.催眠术",), now=NOW)
+    assert "mech.催眠术" in outcome.added
+    assert _source_of(store, book_id, "mech.催眠术") == "user"
+
+    # 升级后自动打标再来一次，仍然是 user（写入层双保护）
+    store.append_event(
+        "label_set",
+        payload={"tag_id": "mech.催眠术", "source": "auto", "confidence": 0.2,
+                 "basis_json": "{}"},
+        book_id=book_id, occurred_at=NOW, config_fingerprint="t/1",
+    )
+    assert _source_of(store, book_id, "mech.催眠术") == "user"
+
+
 def test_edit_removes_auto_tag(store, tmp_path):
     """删标签：自动打的能删掉。"""
     from reco_ui.pages import apply_tag_edits, book_tags_display
