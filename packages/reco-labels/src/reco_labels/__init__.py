@@ -20,6 +20,13 @@ from reco_labels.lifecycle import (
     set_aliases,
 )
 from reco_labels.match import Evidence, TagHit, explain_tag_hit, match_tags
+from reco_labels.noise import (
+    STOPWORDS,
+    SURNAMES,
+    is_noise_candidate,
+    looks_like_person_name,
+    partition_candidates,
+)
 from reco_labels.proposals import (
     TagProposal,
     accept_proposal,
@@ -52,6 +59,8 @@ __all__ = [
     "ManualTagProtected",
     "MergeResult",
     "ProposalRow",
+    "STOPWORDS",
+    "SURNAMES",
     "RecordResult",
     "TagHit",
     "TagProposal",
@@ -63,10 +72,13 @@ __all__ = [
     "axis_coverage",
     "axis_vector",
     "explain_tag_hit",
+    "is_noise_candidate",
     "load_taxonomy",
+    "looks_like_person_name",
     "match_tags",
     "merge_tags",
     "normalize_tag",
+    "partition_candidates",
     "propose_tags",
     "record_tag_hits",
     "reject_proposal",

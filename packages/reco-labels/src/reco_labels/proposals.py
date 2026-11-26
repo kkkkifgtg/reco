@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from reco_labels.clock import resolve
 from reco_labels.lifecycle import add_tag, set_aliases
+from reco_labels.noise import is_noise_candidate
 from reco_labels.store import LabelsStore, TagRow
 
 
@@ -38,6 +39,8 @@ def propose_tags(store: LabelsStore, cooccurrence, *, threshold: int,
             continue
         if candidate in known_tags or candidate in existing_pending:
             continue  # 已知标签/已在 pending → 不重复写
+        if is_noise_candidate(candidate):
+            continue  # #10：人名/停用词不当标签候选（旧行仍可查，新行不再进提案）
         payload = {"candidate": candidate, "count": count, "threshold": threshold}
         # #92：把简体归一吞掉的繁体原形带上——采纳时登记为该标签的别名。
         kept = [str(v) for v in (variants or {}).get(candidate, ()) if str(v).strip()]
@@ -115,6 +118,8 @@ def propose_alias_tags(store, candidates, *, threshold: int,
             continue
         if (str(tag_id), candidate) in known_aliases:
             continue
+        if is_noise_candidate(candidate):
+            continue  # #10：同一个降噪口径，别名提案也不收人名/停用词
         proposal_id = store.insert_proposal(
             kind="alias", candidate=candidate,
             payload={"candidate": candidate, "count": int(count),

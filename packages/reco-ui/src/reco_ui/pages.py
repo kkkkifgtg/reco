@@ -1193,6 +1193,10 @@ def proposal_rows(store) -> list[dict]:
             "status": p["status"],
             "created_at": p["created_at"],
         })
+    # #10：只补一个「是不是人名/停用词」的标记，顺序仍完全由数据层决定。
+    from reco_labels.noise import with_noise_flag
+
+    rows = with_noise_flag(rows)
     # #90：顺序由 reco_store.proposals 的 SQL 保证（count 降序），
     # A6 静态守护：reco_ui 层零排序，排序一律在数据层完成。
     return rows

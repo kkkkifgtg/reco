@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from reco_ui.qt import (
+    QCheckBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -102,6 +103,11 @@ class ProposalsPage(QWidget):
         self.search_input.setClearButtonEnabled(True)
         self.search_input.textChanged.connect(self.apply_search)
         layout.addWidget(self.search_input)
+        # #10：人名/停用词默认折叠到第二屏（仍可采纳，勾选即全部显示）
+        self.show_noise = QCheckBox("显示疑似人名/停用词")
+        self.show_noise.setObjectName("show-noise")
+        self.show_noise.toggled.connect(self.apply_search)
+        layout.addWidget(self.show_noise)
         self._table = QTableWidget(0, 3)
         self._table.setHorizontalHeaderLabels(["候选词", "共现次数", "阈值"])
         layout.addWidget(self._table, 1)
@@ -147,10 +153,12 @@ class ProposalsPage(QWidget):
         self.apply_search()
 
     def apply_search(self) -> None:
-        """按搜索框关键词过滤已加载提案（候选词子串，大小写不敏感；#90）。"""
+        """关键词过滤（#90）+ 噪声折叠（#10）：两项都只影响「显示哪些行」。"""
         keyword = self.search_input.text().strip().casefold()
-        hits = [r for r in self._rows
-                if keyword in str(r.get("candidate", "")).casefold()] if keyword else self._rows
+        matched = [r for r in self._rows
+                   if keyword in str(r.get("candidate", "")).casefold()] if keyword else self._rows
+        folded = 0 if self.show_noise.isChecked() else sum(1 for r in matched if r.get("noise"))
+        hits = matched if self.show_noise.isChecked() else [r for r in matched if not r.get("noise")]
         self._table.setRowCount(len(hits))
         for i, row in enumerate(hits):
             values = [str(row.get("candidate", "")), str(row.get("count", 0)),
@@ -159,7 +167,8 @@ class ProposalsPage(QWidget):
                 self._table.setItem(i, c, QTableWidgetItem(v))
         self.loaded = True
         if self._rows:
-            self._status.setText(f"待确认 {len(hits)} / 共 {len(self._rows)} 条")
+            suffix = f"（已折叠 {folded} 条疑似人名/停用词）" if folded else ""
+            self._status.setText(f"待确认 {len(hits)} / 共 {len(self._rows)} 条{suffix}")
             self.btn_accept.setEnabled(True)
             self.btn_reject.setEnabled(True)
         else:
