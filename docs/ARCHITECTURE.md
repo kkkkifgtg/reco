@@ -15,7 +15,7 @@
 ## 当前实现口径（2026-11-25）
 
 1. **生产向量**：`reco_io.extract` 使用字符 2–3gram 哈希桶计数、Top-64、L2 归一；没有调用 IDF。`feature_vectors.idf_version` 保留旧列名，当前写 `reco-ngram-counts/1`。`reco_core.vectorize` 的语料级 TF-IDF 是独立可用实现，不是当前生产入口。
-2. **正样本口径**：领域契约要求 liked 为已确认正样本；当前 `reco_store.recommend.rank_candidates` 仍把全部已存向量作为相似度质心输入，candidate 与推荐专区只被排除在候选域之外。这是尚未收敛的实现差异，本次统稿不改变推荐算法。
+2. **正样本口径**：相似度质心 = liked 专区中已产出特征向量的作品（按 book_id 去重），与 CONTEXT.md「正样本 = liked/ 中的作品」一致；candidate 与推荐专区不进质心，因此候选区扩容不会静默改动已有书的分数（#102 已收敛）。`rank_candidates` 额外返回 `n_positive`（质心成员数）与 `n_vectors`（库级有向量书数，空态文案依据）。
 3. **阅读器**：GUI 已内建 txt/md、EPUB、DOCX、PDF 阅读页；位置写入独立 `reading_progress` 表，行为信号写 `signal_recorded` 事件。§17 Q12 的「不内建」是历史裁定，已被后续实现取代。
 4. **阅读信号**：`dwell`、`completion`、`reopen` 参与画像行为折叠；`read_time` 当前只采集，不产生画像效应。
 5. **依赖**：以 `uv.lock` 与 `docs/DEPENDENCIES.md` 为准。jieba/pkuseg 是标签挖掘的可选分词器，不再适用早期「不引入 jieba」的依赖结论。
@@ -462,7 +462,7 @@
 score = w_sim × 相似度 + w_model × 分类器输出 + w_behavior × 行为信号
 
 **接口签名**
-- similarity_scores(candidate_vectors, positive_vectors, config) -> list[tuple[book_id, sim]]
+- similarity_scores(candidate_vectors, positive_vectors, config) -> list[tuple[book_id, sim]]（positive_vectors 取 liked 正样本的向量，见上文「当前实现口径」第 2 条）
 - weight_schedule(n_pos, n_neg, cv_auc, config) -> WeightSet（平滑连续，相邻样本量差有上限）
 - score(candidate_features, profile, config, now) -> list[tuple[book_id, score]]（**唯一**打分入口，纯函数）
 - rank(candidate_features, profile, config, now) -> list[RankRow]（RankRow = {book_id, score, rank, reasons, is_exploration}；CLI/GUI 唯一排序来源）

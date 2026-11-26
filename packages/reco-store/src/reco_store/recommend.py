@@ -10,8 +10,11 @@
   cli/ui 平级共同 import 本层，互不依赖。
 - 本模块只读（read_conn + load_mutes），零写库；无正文接触（B2/B5）。
 - 候选域（T4/T6）：推荐候选 = candidate 专区 present 文件的书（按 book_id 去重）；
-  liked 只作正样本（positive_vectors 口径不变）；只要该书拥有任一 present liked
-  文件（同书双区也算），即从候选排除；推荐专区（输出落位）不进候选。
+  只要该书拥有任一 present liked 文件（同书双区也算），即从候选排除；推荐专区
+  （输出落位）不进候选。
+- 正样本口径（#102）：相似度质心 = liked 专区有向量的书（按 book_id 去重）。
+  此前用「全库有向量书」，候选区扩容会静默改变每本书的分数；现在与 CONTEXT.md
+  的正样本定义一致，候选扩容不动质心。
 """
 from __future__ import annotations
 
@@ -29,6 +32,7 @@ __all__ = [
     "load_book_names",
     "load_books",
     "load_candidate_books",
+    "load_positive_books",
     "load_eval_samples",
     "load_profile",
     "load_vectors",
@@ -104,6 +108,26 @@ def load_candidate_books(store) -> list[tuple[int, str | None]]:
             "       SELECT 1 FROM files lf"
             "       WHERE lf.book_id = b.book_id AND lf.zone = 'liked' AND lf.present = 1"
             "   )"
+            " ORDER BY b.book_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [(int(r[0]), None if r[1] is None else str(r[1])) for r in rows]
+
+
+def load_positive_books(store) -> list[tuple[int, str | None]]:
+    """正样本身份：liked 专区 present 文件的书（按 book_id 去重、升序）。
+
+    与 load_candidate_books 对称：这里是相似度质心的成员集（#102）。CONTEXT.md
+    的正样本定义就是「liked/ 中的作品」，候选区扩容因此不会挪动质心；同一本书
+    有多个 liked 文件（硬链接/重复路径）也只计一次。
+    """
+    conn = store.read_conn()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT b.book_id, b.dedup_key FROM books b"
+            " JOIN files f ON f.book_id = b.book_id"
+            " WHERE f.zone = 'liked' AND f.present = 1"
             " ORDER BY b.book_id"
         ).fetchall()
     finally:
@@ -191,11 +215,12 @@ def _assemble(store) -> dict:
     vectors = load_vectors(store)
     books = load_books(store)
     candidate_books = load_candidate_books(store)
+    positive_books = load_positive_books(store)
     candidates = [
         (format_rank_book_id(bid), {"dedup_key": key, "vector": vectors.get(bid, {})})
         for bid, key in candidate_books
     ]
-    positive_vectors = tuple(vectors[bid] for bid, _key in books if vectors.get(bid))
+    positive_vectors = tuple(vectors[bid] for bid, _key in positive_books if vectors.get(bid))
     return {
         "vectors": vectors,
         "books": books,
@@ -204,7 +229,8 @@ def _assemble(store) -> dict:
         "profile": load_profile(store),
         "mute": mute_map_from_store(store),
         "n_candidates": len(candidates),
-        "n_vectors": len(positive_vectors),  # 库级：空态区分「是否已生产向量」
+        "n_vectors": len(vectors),  # 库级：空态区分「是否已生产向量」
+        "n_positive": len(positive_vectors),  # 质心成员数（liked 且有向量）
         "n_skipped": max(0, len(candidate_books)
                          - sum(1 for bid, _key in candidate_books if vectors.get(bid))),
     }
@@ -249,9 +275,10 @@ def rank_candidates(store, config=None) -> dict:
     """唯一装配：库态 → 画像/静音/真实候选向量 → rank_only 唯一入口（A6）。
 
     候选域 = candidate 专区（T4；liked 只作正样本，推荐专区为输出落位）。
-    返回 {rank_rows, profile, muted, names, n_candidates, n_vectors, n_skipped}；
-    n_candidates = 候选书数，n_vectors = 库级有向量书数（空态区分「是否已生产
-    向量」），n_skipped = 候选缺向量书数。排序由 reco_core 完成，本层零排序；
+    返回 {rank_rows, profile, muted, names, n_candidates, n_vectors, n_positive,
+    n_skipped}；n_candidates = 候选书数，n_vectors = 库级有向量书数（空态区分
+    「是否已生产向量」），n_positive = 质心成员数（liked 且有向量），n_skipped =
+    候选缺向量书数。排序由 reco_core 完成，本层零排序；
     无向量候选照常进候选装配（score 侧跳过并计数——§6.3 不静默当 0 分）。
     """
     from reco_core.feedback import rank_only
@@ -263,6 +290,7 @@ def rank_candidates(store, config=None) -> dict:
     out["names"] = load_book_names(store)
     out["n_candidates"] = a["n_candidates"]
     out["n_vectors"] = a["n_vectors"]
+    out["n_positive"] = a["n_positive"]
     out["n_skipped"] = a["n_skipped"]
     return out
 
