@@ -393,7 +393,7 @@ def cmd_eval(db) -> int:
     """评估入口：真实样本接线 + 持久化门（W13/W8 接缝②；§6.3 ≥10 才评估）。"""
     from datetime import datetime, timezone as _tz
 
-    from reco_core.profile import persist_evaluation_gate
+    from reco_core.profile import persist_evaluation_gate, sample_counts_for_scoring
     from reco_core.score import evaluate_pairwise
     from reco_store.recommend import load_eval_samples, load_profile
 
@@ -401,16 +401,15 @@ def cmd_eval(db) -> int:
         store = open_store(db)
         try:
             profile = load_profile(store)
-            counts = profile.sample_counts
-            n_pos = int(counts.get("tag_like", 0))
-            n_neg = int(counts.get("tag_dislike", 0))
+            gate = sample_counts_for_scoring(profile.sample_counts)  # 与画像同源（#103）
+            n_pos, n_neg = gate["n_pos"], gate["n_neg"]
             if n_pos < 10 or n_neg < 10:
                 print(json.dumps(
                     {"status": "insufficient", "n_pos": n_pos, "n_neg": n_neg,
                      "display": f"样本 {n_pos}/{n_neg}（正/负），不足以判定，不评估"},
                     ensure_ascii=False))
                 return 0
-            samples = load_eval_samples(store)  # W11 遗留闭合：真实样本（非 []）
+            samples = load_eval_samples(store)  # 一册一行、样本=特征向量（#103）
             result = evaluate_pairwise(samples, None)
             now = datetime.now(_tz.utc)
             eval_event_id = persist_evaluation_gate(

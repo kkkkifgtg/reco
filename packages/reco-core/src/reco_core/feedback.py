@@ -31,7 +31,9 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Mapping
 
-from reco_core.profile import build_profile, persist_profile_snapshot, update_profile
+from reco_core.profile import (
+    build_profile, persist_profile_snapshot, sample_counts_for_scoring, update_profile,
+)
 from reco_core.score import Profile as ScoreProfile
 from reco_core.score import Reason as ScoreReason
 from reco_core.score import rank as score_rank
@@ -383,11 +385,9 @@ def _score_feedback_aware(candidate_features, profile, config=None, mute_by_key=
             for bid in muted_ids:
                 sim = sims.get(bid, 0.0)
                 signals[bid] = -(_MUTE_DAMP - _MUTE_KEEP) * w_sim * sim / w_behavior_view
-    counts = getattr(profile, "sample_counts", None) or {}
     sp = ScoreProfile(
         weights=weights,
-        sample_counts={"n_pos": int(counts.get("tag_like", 0) or 0),
-                       "n_neg": int(counts.get("tag_dislike", 0) or 0)},
+        sample_counts=sample_counts_for_scoring(getattr(profile, "sample_counts", None)),
         behavior_signals=signals,
         positive_vectors=tuple(positive_vectors or ()),
     )

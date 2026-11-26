@@ -39,6 +39,7 @@ __all__ = [
     "build_profile",
     "update_profile",
     "profile_confidence",
+    "sample_counts_for_scoring",
     "axis_trends",
     "export_profile",
     "verify_replay",
@@ -374,6 +375,24 @@ def merge_signal(event, config=None, now=None) -> list[dict]:
 
 
 # ---------------------------------------------------------------- 置信度
+
+def sample_counts_for_scoring(sample_counts) -> dict:
+    """画像计数 → score.Profile 的门控口径 {n_pos, n_neg}（唯一转换点，#103）。
+
+    画像装配写的是 tag_like/tag_dislike，score 读的是 n_pos/n_neg；此前每个调用方
+    （CLI eval、store 的静音感知装配）各抄一遍键名映射，漏一处就静默按 0 算门。
+    两种键名都接受，优先显式 n_pos/n_neg。
+    """
+    counts = sample_counts or {}
+
+    def _get(primary, legacy):
+        value = counts.get(primary)
+        if value is None:
+            value = counts.get(legacy, 0)
+        return int(value or 0)
+
+    return {"n_pos": _get("n_pos", "tag_like"), "n_neg": _get("n_neg", "tag_dislike")}
+
 
 def _confidence_from(n_pos: int, n_neg: int, n_axes: int, n_covered: int) -> Confidence:
     cap = 0.3 if n_pos < 10 else 1.0

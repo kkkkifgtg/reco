@@ -145,18 +145,30 @@ def load_book_names(store) -> dict[str, str]:
     return {format_rank_book_id(r[0]): str(r[1]) for r in rows}
 
 
-def load_eval_samples(store) -> list[tuple[str, str, int]]:
-    """eval 样本装配：zone → label（liked=1 其余 0），文本 = display_name（W8 契约 (id,text,label)）。"""
+def load_eval_samples(store) -> list[tuple[str, dict[int, float], int]]:
+    """eval 样本装配：(book_id, 特征向量, label)，一册一行、与打分同源（#103）。
+
+    - 一册一行：按 book_id 聚合，同书多路径（硬链接/跨区副本）只计一次；
+    - 特征与 §6.3 同源：用 feature_vectors 的向量，而不是书名文本；
+    - label：liked 专区 present = 1，其余 = 0；
+    - 没有向量的书不进样本——打分时它本就参与不了，评估也不该凭空补一个。
+    """
     conn = store.read_conn()
     try:
         rows = conn.execute(
-            "SELECT b.book_id, b.display_name, f.zone FROM books b"
-            " JOIN files f ON f.book_id = b.book_id"
-            " WHERE f.present = 1 ORDER BY b.book_id"
+            "SELECT b.book_id,"
+            "       MAX(CASE WHEN f.zone = 'liked' THEN 1 ELSE 0 END) AS label"
+            " FROM books b JOIN files f ON f.book_id = b.book_id"
+            " WHERE f.present = 1"
+            " GROUP BY b.book_id ORDER BY b.book_id"
         ).fetchall()
     finally:
         conn.close()
-    return [(format_rank_book_id(r[0]), str(r[1]), 1 if r[2] == "liked" else 0) for r in rows]
+    vectors = load_vectors(store)
+    return [
+        (format_rank_book_id(bid), vectors[bid], 1 if label else 0)
+        for bid, label in rows if vectors.get(bid)
+    ]
 
 
 def load_axis_ids(store) -> tuple[str, ...]:

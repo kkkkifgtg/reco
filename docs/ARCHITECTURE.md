@@ -467,8 +467,8 @@ score = w_sim × 相似度 + w_model × 分类器输出 + w_behavior × 行为�
 - score(candidate_features, profile, config, now) -> list[tuple[book_id, score]]（**唯一**打分入口，纯函数）
 - rank(candidate_features, profile, config, now) -> list[RankRow]（RankRow = {book_id, score, rank, reasons, is_exploration}；CLI/GUI 唯一排序来源）
 - explain(candidate_features, profile, book_id) -> list[Reason]（命中轴/相似样本 id/权重贡献）
-- train_pairwise(labeled_features, config) -> ModelHandle | None（仅 n_pos≥10 且 n_neg≥10 时返回句柄，否则 None）
-- evaluate_pairwise(samples, config) -> EvalResult（auc, ci_low, ci_high, folds, n_pos, n_neg）
+- train_pairwise(labeled_features, config) -> ModelHandle | None（仅 n_pos≥10 且 n_neg≥10 时返回句柄，否则 None；样本 = (book_id, 特征向量, label)，与打分同源）
+- evaluate_pairwise(samples, config) -> EvalResult（auc, ci_low, ci_high, folds, n_pos, n_neg；样本同上，一册一行）
 - similarity_provider（可注入：默认 TF-IDF；句向量只能作为外部插件）
 
 **硬性行为**
