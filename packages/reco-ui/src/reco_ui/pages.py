@@ -46,7 +46,6 @@ from reco_ui.qt import (
     QModelIndex,
     QObject,
     QPushButton,
-    QRunnable,
     Qt,
     QTableView,
     QThreadPool,
@@ -54,6 +53,7 @@ from reco_ui.qt import (
     QWidget,
     pyqtSignal,
 )
+from reco_ui.workers import PoolWorker
 
 _ZONE_HEADERS = ("book_id", "书名", "大小", "备注")
 
@@ -202,14 +202,6 @@ class LoaderSignals(QObject):
     failed = pyqtSignal(str)
 
 
-# 运行中/排队中的 loader 注册表：QThreadPool 不持 Python 包装引用，
-# 窗口被 GC 后排队 worker 的包装会悬垂 → 退出期 0xC0000409。
-# 注册表在 run() 结束（finally）时释放，保证任何时点 worker 都有活引用。
-_ACTIVE_LOADERS: set = set()
-_ACTIVE_FEEDBACK: set = set()  # 反馈 worker 同款持活注册表（坑 2/生命周期）
-_ACTIVE_IMPORTS: set = set()  # W16 F1：导入 worker 持活注册表
-
-
 # W17：扫描口径为单一事实源；UI 导入白名单 = 扫描口径并集文档扩展
 from reco_io.scanner import TEXT_EXTS as _SCAN_TEXT_EXTS
 
@@ -220,7 +212,7 @@ class ImportSignals(QObject):
     done = pyqtSignal(int, int, int, list, str)  # (imported, skipped, rejected, rows, error)
 
 
-class ImportWorker(QRunnable):
+class ImportWorker(PoolWorker):
     """W16 F1：place_by_hardlink 落位 + file_added 落库（池线程；UI 零阻塞）。
 
     payload 契约与 seed_books/scan 同构：path=专区目录产物实际路径、
@@ -228,14 +220,14 @@ class ImportWorker(QRunnable):
     扫描器后续扫到同一文件按 (st_dev, st_ino) 配对，不重复建 book）。
     """
 
+    SIGNALS = ImportSignals
+
     def __init__(self, store, zone: str, data_root, paths) -> None:
         super().__init__()
         self._store = store
         self._zone = zone
         self._data_root = str(data_root)
         self._paths = list(paths)
-        self.signals = ImportSignals()
-        _ACTIVE_IMPORTS.add(self)
 
     def run(self) -> None:
         imported = skipped = rejected = 0
@@ -296,14 +288,6 @@ class ImportWorker(QRunnable):
         except Exception:
             return []
 
-    def _emit(self, imported: int, skipped: int, rejected: int, rows: list, error: str) -> None:
-        try:
-            self.signals.done.emit(imported, skipped, rejected, list(rows), error)
-        except RuntimeError:
-            pass  # 接收方已销毁
-        finally:
-            _ACTIVE_IMPORTS.discard(self)
-
 
 def _utcnow_iso() -> str:
     from datetime import datetime, timezone
@@ -317,12 +301,14 @@ class ScanSignals(QObject):
     done = pyqtSignal(str, int, int, int, int, str)
 
 
-class ScanWorker(QRunnable):
+class ScanWorker(PoolWorker):
     """N1 单专区目录→库再扫描 worker（池线程；UI 线程零扫描零 DB 写）。
 
     语义实现在 reco_ui.sync.sync_zone（纯层，独立测试钉死）；本类只做
     QRunnable 包装与异常→字符串收敛（§11.1 同款口径）。
     """
+
+    SIGNALS = ScanSignals
 
     def __init__(self, store, zone: str, data_root, *, stat_provider=None) -> None:
         super().__init__()
@@ -330,8 +316,6 @@ class ScanWorker(QRunnable):
         self._zone = zone
         self._data_root = data_root
         self._stat_provider = stat_provider
-        self.signals = ScanSignals()
-        _ACTIVE_IMPORTS.add(self)  # 复用扫描类 worker 持活注册表（生命周期同款）
 
     def run(self) -> None:
         import time as _time
@@ -342,11 +326,12 @@ class ScanWorker(QRunnable):
             since = _time.strftime("%Y-%m-%dT%H:%M:%S+00:00", _time.gmtime())
             result = sync_zone(self._store, self._zone, self._data_root,
                                stat_provider=self._stat_provider)
-            self._emit(result.added, result.removed, result.moved, result.changed, "")
+            self._emit(self._zone, result.added, result.removed, result.moved,
+                       result.changed, "")
             # #85：本轮触及的书接通画像（提取→挖掘→打标→仅 liked 折叠）
             self._process_touched(since)
         except Exception as exc:  # UI 只收字符串
-            self._emit(0, 0, 0, 0, f"{type(exc).__name__}: {exc}")
+            self._emit(self._zone, 0, 0, 0, 0, f"{type(exc).__name__}: {exc}")
 
     def _process_touched(self, since: str) -> None:
         """对本轮同步触及（last_seen_at>=since）的书做画像接线；失败只 warn。"""
@@ -365,13 +350,6 @@ class ScanWorker(QRunnable):
         except Exception as exc:
             print(f"warn: 画像接线失败 zone={self._zone}: {exc}", file=sys.stderr)
 
-    def _emit(self, added: int, removed: int, moved: int, changed: int, error: str) -> None:
-        try:
-            self.signals.done.emit(self._zone, added, removed, moved, changed, error)
-        except RuntimeError:
-            pass  # 接收方已销毁
-        finally:
-            _ACTIVE_IMPORTS.discard(self)
 #80：「标为喜欢」的真移动 worker 已迁到阅读界面（reader_page.ReaderLikeMoveWorker），
 # 列表层不再有移动入口，故此处移除原 LikeMoveWorker。
 
@@ -380,8 +358,10 @@ class FeedbackSignals(QObject):
     done = pyqtSignal(int, str)  # (event_id, error)；error 非空 = 失败
 
 
-class FeedbackWorker(QRunnable):
+class FeedbackWorker(PoolWorker):
     """反馈落库 worker：record_feedback（含静音窗口）在池线程执行，§11.1。"""
+
+    SIGNALS = FeedbackSignals
 
     def __init__(self, store, kind: str, book_id: int, axis=None) -> None:
         super().__init__()
@@ -389,8 +369,6 @@ class FeedbackWorker(QRunnable):
         self._kind = kind
         self._book_id = book_id
         self._axis = axis
-        self.signals = FeedbackSignals()
-        _ACTIVE_FEEDBACK.add(self)
 
     def run(self) -> None:
         from reco_ui.glue import record_feedback
@@ -401,33 +379,27 @@ class FeedbackWorker(QRunnable):
         except Exception as exc:
             self._emit(0, f"{type(exc).__name__}: {exc}")
 
-    def _emit(self, event_id: int, error: str) -> None:
-        try:
-            self.signals.done.emit(event_id, error)
-        except RuntimeError:
-            pass  # 接收方已销毁：结果无人接收
-        finally:
-            _ACTIVE_FEEDBACK.discard(self)
 
 
 class RankLoaderSignals(QObject):
     finished = pyqtSignal(object, str)  # (rank 输出 dict, error)；error 非空 = 失败
 
 
-class RankLoader(QRunnable):
+class RankLoader(PoolWorker):
     """QRunnable 推荐装配：rank_candidates（唯一装配层）在池线程执行（§11.1）。
 
     W13 承接①：RankRow 经生产 worker 路径送达 RecommendPage——CLI/GUI 逐位一致的
     生产对齐面；装配层零排序复制（A6）。
     """
 
+    SIGNALS = RankLoaderSignals
+    SIGNAL_NAME = "finished"
+
     def __init__(self, store, exploration_count=None) -> None:
         super().__init__()
         self._store = store
         # #82：生成篇数（探索位配额）；None = 不覆盖，沿用 score 默认 2 篇
         self._exploration_count = exploration_count
-        self.signals = RankLoaderSignals()
-        _ACTIVE_LOADERS.add(self)  # 入队即持活（QThreadPool 不持 Python 包装）
 
     def run(self) -> None:
         try:
@@ -452,27 +424,21 @@ class RankLoader(QRunnable):
             return
         self._emit(out, "")
 
-    def _emit(self, out, error: str) -> None:
-        try:
-            self.signals.finished.emit(out, error)
-        except RuntimeError:
-            pass  # UI 已销毁：迟到发射静默丢弃
-        finally:
-            _ACTIVE_LOADERS.discard(self)
 
 
 class ProfileLoaderSignals(QObject):
     finished = pyqtSignal(object, str)  # (profile_rows dict, error)
 
 
-class ProfileLoader(QRunnable):
+class ProfileLoader(PoolWorker):
     """QRunnable 画像装配：profile_rows（W9 真实画像重放）在池线程执行（§11.1）。"""
+
+    SIGNALS = ProfileLoaderSignals
+    SIGNAL_NAME = "finished"
 
     def __init__(self, store) -> None:
         super().__init__()
         self._store = store
-        self.signals = ProfileLoaderSignals()
-        _ACTIVE_LOADERS.add(self)
 
     def run(self) -> None:
         try:
@@ -483,13 +449,6 @@ class ProfileLoader(QRunnable):
             return
         self._emit(data, "")
 
-    def _emit(self, data, error: str) -> None:
-        try:
-            self.signals.finished.emit(data, error)
-        except RuntimeError:
-            pass
-        finally:
-            _ACTIVE_LOADERS.discard(self)
 
 
 class BookSourceSignals(QObject):
@@ -498,7 +457,7 @@ class BookSourceSignals(QObject):
     done = pyqtSignal(int, str, str, str)
 
 
-class BookSourceWorker(QRunnable):
+class BookSourceWorker(PoolWorker):
     """双击打开阅读页的源查询 worker：书号与源路径都在池线程读取（§11.1 UI 线程零 DB）。
 
     #58：原实现在 UI 线程调 zone_page_rows + read_conn；改为 worker 后
@@ -512,13 +471,13 @@ class BookSourceWorker(QRunnable):
     ZoneTableModel.book_id_at），worker 只按书号查源路径，不再做位置解析。
     """
 
+    SIGNALS = BookSourceSignals
+
     def __init__(self, store, zone: str, book_id: int) -> None:
         super().__init__()
         self._store = store
         self._zone = zone
         self._book_id = int(book_id)
-        self.signals = BookSourceSignals()
-        _ACTIVE_LOADERS.add(self)
 
     def run(self) -> None:
         try:
@@ -533,49 +492,25 @@ class BookSourceWorker(QRunnable):
         found = source_row(self._store, book_id, self._zone)
         return ("", "") if found is None else found
 
-    def _emit(self, book_id: int, path: str, name: str, error: str) -> None:
-        try:
-            self.signals.done.emit(int(book_id), path, name, error)
-        except RuntimeError:
-            pass  # UI 已销毁：迟到发射静默丢弃
-        finally:
-            _ACTIVE_LOADERS.discard(self)
-
-class ZoneLoader(QRunnable):
+class ZoneLoader(PoolWorker):
     """QRunnable zone 查询：结果/异常经信号回 UI 线程（UI 线程零 DB，§11.1）。"""
+
+    SIGNALS = LoaderSignals
 
     def __init__(self, store, zone: str, *, lib_ms: float = 800.0) -> None:
         super().__init__()
         self._store = store
         self._zone = zone
         self._lib_ms = lib_ms
-        self.signals = LoaderSignals()
-        _ACTIVE_LOADERS.add(self)  # 入队即持活（见上方注册表说明）
 
     def run(self) -> None:
         try:
             with perf_span(f"ui.load.{self._zone}"):
                 rows = zone_page_rows(self._store, self._zone, lib_ms=self._lib_ms)
         except Exception as exc:  # UI 只收字符串消息，不收异常对象
-            self._emit_failed(f"{type(exc).__name__}: {exc}")
+            self._emit_on("failed", f"{type(exc).__name__}: {exc}")
             return
-        self._emit_finished(rows)
-
-    def _emit_finished(self, rows) -> None:
-        try:
-            self.signals.finished.emit(rows)
-        except RuntimeError:
-            pass  # UI 已销毁（测试收尾/窗口关闭）：迟到发射静默丢弃，结果本已无人接收
-        finally:
-            _ACTIVE_LOADERS.discard(self)  # run() 完成，注册表释放
-
-    def _emit_failed(self, message: str) -> None:
-        try:
-            self.signals.failed.emit(message)
-        except RuntimeError:
-            pass  # 同上：接收方已不存在，迟到失败上报无意义
-        finally:
-            _ACTIVE_LOADERS.discard(self)  # run() 完成，注册表释放
+        self._emit_on("finished", rows)
 
 
 # W16 F2：专区目录映射（data_root + zone 名）；推荐专区中文目录名与文件表 zone 值一致。

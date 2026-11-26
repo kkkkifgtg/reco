@@ -57,9 +57,19 @@ from reco_ui.theme import apply_dark_theme
 # 仍远小于无响应感知阈值，失败路径有「重试」入口兜底。
 _LOAD_LIB_MS = 1500.0
 
-# W16：数据根目录配置（用户可经 config 注入覆盖；当前默认目录可能不存在，
+# W16：数据根目录配置（用户可经 config 注入覆盖；默认目录可能不存在，
 # 「打开文件夹」时由 ensure_zones 创建——F2 契约）。
-DEFAULT_DATA_ROOT = "F:/date/adult-reco/data"
+# #113：默认值不再钉死某台机器的绝对路径——环境变量优先，否则用户目录下
+# 的 reco-data/；装到别人机器上不会指向一个不存在的 F:/date/... 。
+def default_data_root() -> str:
+    """数据根目录：RECO_DATA_ROOT 优先，否则 ~/reco-data（每次调用都重读环境）。"""
+    env = os.environ.get("RECO_DATA_ROOT")
+    if env:
+        return str(Path(env))
+    return str(Path.home() / "reco-data")
+
+
+DEFAULT_DATA_ROOT = default_data_root()
 
 # N1：定时自动扫描默认关闭（config["scan_interval_s"]>0 才启动；QTimer 周期
 # 触发后台重扫，UI 零阻塞——语义与手动「刷新」同一条 sync 落库路径）。
@@ -124,7 +134,7 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self._store = store
         self._config = dict(config or {})  # N1：配置快照（定时自动扫描参数读取）
-        self._data_root = self._config.get("data_root", DEFAULT_DATA_ROOT)  # W16 配置注入
+        self._data_root = self._config.get("data_root") or default_data_root()  # W16 配置注入
         self._pages: dict[str, PagePlaceholder] = {}
         self._inflight: set[str] = set()  # 坑 2：in-flight 去重
         # F1：同页在途时排一次重载（in-flight 去重会吞掉重算请求 → 行过期残留）

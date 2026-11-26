@@ -16,7 +16,6 @@ from reco_ui.qt import (
     QLineEdit,
     QObject,
     QPushButton,
-    QRunnable,
     QTableWidget,
     QTableWidgetItem,
     QThreadPool,
@@ -24,8 +23,7 @@ from reco_ui.qt import (
     QWidget,
     pyqtSignal,
 )
-
-_ACTIVE_PROPOSAL_WORKERS: set = set()
+from reco_ui.workers import PoolWorker
 
 
 class ProposalActionSignals(QObject):
@@ -34,8 +32,10 @@ class ProposalActionSignals(QObject):
     done = pyqtSignal(list, str)
 
 
-class ProposalActionWorker(QRunnable):
+class ProposalActionWorker(PoolWorker):
     """池线程执行「采纳/拒绝 + 重查 pending 列表」（§11.1 UI 线程零 DB）。"""
+
+    SIGNALS = ProposalActionSignals
 
     def __init__(self, store, action: str, candidate: str, axis: str = "tag") -> None:
         super().__init__()
@@ -43,8 +43,6 @@ class ProposalActionWorker(QRunnable):
         self._action = action
         self._candidate = candidate
         self._axis = axis
-        self.signals = ProposalActionSignals()
-        _ACTIVE_PROPOSAL_WORKERS.add(self)
 
     def run(self) -> None:
         from reco_labels.auto_tag import StoreAdapter
@@ -69,14 +67,6 @@ class ProposalActionWorker(QRunnable):
             self._emit([], f"{message}（列表刷新失败：{type(exc).__name__}）")
             return
         self._emit(rows, message)
-
-    def _emit(self, rows: list, message: str) -> None:
-        try:
-            self.signals.done.emit(list(rows), message)
-        except RuntimeError:
-            pass  # 接收方已销毁
-        finally:
-            _ACTIVE_PROPOSAL_WORKERS.discard(self)
 
 
 class ProposalsPage(QWidget):

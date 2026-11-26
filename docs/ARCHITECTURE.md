@@ -22,6 +22,7 @@
 6. **文本口径**：解码（BOM → utf-8 → gb18030 严格）、HTML 剥离（线性、无回溯）与 EPUB spine 顺序只有一份实现，在 `reco_io.textkit`；阅读器、特征提取与标签挖掘都从这里取。长书的重复短语比与 n-gram 桶只吃前 100 万非空白字符（`DEFAULT_REPEAT_WINDOW_CHARS`，确定性前缀），`char_count` 等统计量吃全文。
 7. **测试**：当前全仓基线为 `840 passed / 4 skipped`（2026-11-26，离屏模式；跳过项为 torch 未安装、Windows 符号链接权限、两个 POSIX 权限用例）；历史验收与复盘中的 379/384 等数字均是其当时快照。
 8. **重放比对面与静音出口**：#111 起 `proposals` 进 `COMPARE_TABLES`（重放漂移不再只在审核列表上不可见）；静音解除有了生产路径——`reco_store.feedback.release_feedback` 写 `mute_released`，CLI `unmute` 是它的第一个调用方，用户不必等静音到期。
+9. **池线程 worker 与默认路径**：#113 起所有 QRunnable 走 `reco_ui.workers.PoolWorker`（入队即持活、发射后释放、每子类独立注册表、销毁后发射静默丢弃），不再各抄一份注册表；数据根默认值从 `RECO_DATA_ROOT` 派生，未设时为 `~/reco-data`，不再写死某台机器的 `F:` 路径。
 
 下文保留决策形成时的调研与论证；涉及上述各项的旧结论不覆盖本清单。
 

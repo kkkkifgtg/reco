@@ -12,7 +12,8 @@
 from __future__ import annotations
 
 from reco_io.perf import perf_span
-from reco_ui.qt import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
+from reco_ui.qt import QObject, QThreadPool, QTimer, pyqtSignal
+from reco_ui.workers import PoolWorker
 
 DEFAULT_HOT_THRESHOLD = 3
 DEFAULT_TOP_K = 2
@@ -47,17 +48,18 @@ class _PreloadSignals(QObject):
     finished = pyqtSignal(str, bool)  # (page_id, ok)
 
 
-class _PreloadRunner(QRunnable):
+class _PreloadRunner(PoolWorker):
     """单页预热 worker：可打断（运行前查 user_interrupt）；perf span 内执行。"""
+
+    SIGNALS = _PreloadSignals
+    SIGNAL_NAME = "finished"
 
     def __init__(self, page_id: str, job, signals: _PreloadSignals,
                  user_interrupt: list[bool]) -> None:
-        super().__init__()
+        super().__init__(signals)
         self._page_id = page_id
         self._job = job
-        self._signals = signals
         self._interrupt = user_interrupt
-        _ACTIVE_PRELOADS.add(self)
 
     def run(self) -> None:  # noqa: N802（Qt 命名）
         ok = False
@@ -67,17 +69,7 @@ class _PreloadRunner(QRunnable):
                     ok = bool(self._job())
         except Exception:
             ok = False  # 失败不置位（坑 3），按需路径兜底
-        try:
-            self._signals.finished.emit(self._page_id, ok)
-        except RuntimeError:
-            pass  # 接收方已销毁
-        finally:
-            _ACTIVE_PRELOADS.discard(self)
-
-
-# 预热 worker 注册表（QThreadPool 不持 Python 包装；run() finally 释放——
-# 与 pages.py _ACTIVE_LOADERS 同款生命周期防线，防退出期 0xC0000409）。
-_ACTIVE_PRELOADS: set = set()
+        self._emit(self._page_id, ok)
 
 
 class Preloader(QObject):

@@ -69,19 +69,31 @@ def test_recommend_page_has_open_folder_button(qapp, store, tmp_path):
 
 # —— 配置注入 ——
 
-def test_default_data_root_constant():
-    from reco_ui.app import DEFAULT_DATA_ROOT
+def test_default_data_root_prefers_env(monkeypatch, tmp_path):
+    """#113：默认数据根可配置，不再钉死某台机器的绝对路径。"""
+    from reco_ui.app import default_data_root
 
-    assert DEFAULT_DATA_ROOT.replace("\\", "/") == "F:/date/adult-reco/data"
+    monkeypatch.setenv("RECO_DATA_ROOT", str(tmp_path))
+    assert default_data_root() == str(tmp_path)
 
 
-def test_mainwindow_injects_data_root(qapp, store, tmp_path):
-    from reco_ui.app import MainWindow
+def test_default_data_root_falls_back_to_user_dir(monkeypatch):
+    from pathlib import Path
+
+    from reco_ui.app import default_data_root
+
+    monkeypatch.delenv("RECO_DATA_ROOT", raising=False)
+    assert default_data_root() == str(Path.home() / "reco-data")
+
+
+def test_mainwindow_injects_data_root(qapp, store, tmp_path, monkeypatch):
+    from reco_ui.app import MainWindow, default_data_root
 
     win = MainWindow(store=store, config={"data_root": str(tmp_path)})
     assert win.page("liked")._data_root == str(tmp_path)
+    monkeypatch.delenv("RECO_DATA_ROOT", raising=False)
     win2 = MainWindow(store=store)
-    assert win2.page("liked")._data_root.replace("\\", "/") == "F:/date/adult-reco/data"
+    assert win2.page("liked")._data_root == default_data_root()
 
 
 # —— F3 开始推荐 ——
