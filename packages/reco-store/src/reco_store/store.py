@@ -511,6 +511,28 @@ def _apply_event(conn: sqlite3.Connection, event: Event) -> None:
     elif t == "label_cleared":
         conn.execute("DELETE FROM book_tags WHERE book_id = ? AND tag_id = ? AND source = 'auto'",
                      (event.book_id, p["tag_id"]))  # F2：只清 auto 行；manual/user 双保护
+    elif t == "label_moved":
+        # #104：合并搬迁人工行（merge 是用户动作，不是自动提取——D1 保护的是
+        # auto 覆盖，不是人工合并）。行内 source/confidence/basis/updated_at 原样
+        # 保留，只改指向；目标已有行时保留目标行（人工已有判断优先）。
+        row = conn.execute(
+            "SELECT source, confidence, basis_json, updated_at FROM book_tags"
+            " WHERE book_id = ? AND tag_id = ?",
+            (event.book_id, p["tag_id"]),
+        ).fetchone()
+        if row is not None:
+            conn.execute("DELETE FROM book_tags WHERE book_id = ? AND tag_id = ?",
+                         (event.book_id, p["tag_id"]))
+            exists = conn.execute(
+                "SELECT 1 FROM book_tags WHERE book_id = ? AND tag_id = ?",
+                (event.book_id, p["into"]),
+            ).fetchone()
+            if exists is None:
+                conn.execute(
+                    "INSERT INTO book_tags(book_id, tag_id, source, confidence, basis_json, updated_at)"
+                    " VALUES(?,?,?,?,?,?)",
+                    (event.book_id, p["into"], *row),
+                )
     elif t == "signal_recorded":
         conn.execute(
             "INSERT INTO signals(book_id, kind, value, occurred_at, source, session_id) VALUES(?,?,?,?,?,?)",

@@ -32,13 +32,13 @@ from reco_labels.taxonomy import match_keys
 from reco_labels.proposals import propose_alias_tags, propose_tags, variant_alias_candidates
 from reco_labels.record import RecordResult, record_tag_hits
 from reco_labels.store import BookTagRow, LabelsStore, ProposalRow, TagRow
+from reco_labels.vocab import validate_proposal_status
 
 # 自动提议阈值（工单 06 proposals 语义沿用：count≥3 才提议）
 TAG_PROPOSE_THRESHOLD = 3
 
 # StoreAdapter 写路径指纹（事件流里标识来源）与 labels 事件折叠规则
 _ADAPTER_FP = "rr2/adapter/1"
-_PROPOSAL_STATUSES = frozenset({"pending", "accepted", "rejected"})
 # 已在对应写方法里落库的 labels 事件：append_event 收到时不再重复写，
 # 也绝不误映射成 proposal_created。
 _EVENTS_FOLDED_ELSEWHERE = frozenset({
@@ -166,10 +166,12 @@ class StoreAdapter:
         )
 
     def redirect_book_tag_rows(self, source_tag: str, target_tag: str) -> int:
-        """合并搬迁：auto 行经 label_set + label_cleared 事件改写（事件流可重放）。
+        """合并搬迁：逐行改指向，source/confidence/basis 原样保留（工单 06 验收 1）。
 
-        manual/user 行不搬——reco-store 无「重写人工行」事件（D1/F2 写入层双保护），
-        其身份经 tags.merged_into 链解析；彻底搬迁需 store 增补专用事件。
+        auto 行经 label_set + label_cleared（重放即重建）；manual/user 行经
+        label_moved 事件（#104 新增投影）——D1 保护的是「auto 覆盖人工」，
+        合并是用户动作，人工行必须一起搬，否则同一份数据在内存实现与 SQLite
+        上会得到两个答案。
         """
         conn = self._store.read_conn()
         try:
@@ -182,6 +184,12 @@ class StoreAdapter:
         moved = 0
         for book_id, source, confidence, basis_json, updated_at in rows:
             if str(source) in ("manual", "user"):
+                self._store.append_event(
+                    "label_moved", book_id=int(book_id),
+                    payload={"tag_id": str(source_tag), "into": str(target_tag)},
+                    occurred_at=str(updated_at), config_fingerprint=_ADAPTER_FP,
+                )
+                moved += 1
                 continue
             self.record_book_tag(
                 int(book_id), str(target_tag), source=str(source),
@@ -283,10 +291,7 @@ class StoreAdapter:
         枚举校验与存在性校验都在事件面之前——非法输入绝不留坏事件（否则重放会把
         坏状态再演一遍）。投影 UPDATE 由 store 在同一事务完成；重放逐位恢复状态。
         """
-        if status not in _PROPOSAL_STATUSES:
-            raise ValueError(
-                f"非法提案状态: {status!r}（只允许 pending/accepted/rejected）"
-            )
+        validate_proposal_status(status)  # #104：词表与守卫只此一份
         pid = int(str(proposal_id))
         conn = self._store.read_conn()
         try:

@@ -650,7 +650,7 @@ score = w_sim × 相似度 + w_model × 分类器输出 + w_behavior × 行为�
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | event_id | INTEGER PK AUTOINCREMENT | 顺序即因果顺序 |
-| event_type | TEXT | scan_started/completed、file_added/moved/removed/fingerprint_changed、tag_added/merged/archived、tag_hit、relation_updated/manual_set、label_set/label_cleared、signal_recorded、profile_updated、rec_generated、rec_feedback、eval_run、perf_sample |
+| event_type | TEXT | scan_started/completed、file_added/moved/removed/fingerprint_changed、tag_added/merged/archived、tag_hit、relation_updated/manual_set、label_set/label_cleared/label_moved、signal_recorded、profile_updated、rec_generated、rec_feedback、eval_run、perf_sample |
 | book_id | INTEGER NULL | 无书的系统事件为空 |
 | payload_json | TEXT | 事件私有字段（数值/标签/路径/原因；**不含 effective_weight**——由 occurred_at + config_fingerprint 折叠时重算，建议项 2 裁定） |
 | occurred_at | TEXT | 业务时间（回放基准） |
