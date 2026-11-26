@@ -335,56 +335,40 @@ def cmd_feedback(kind, *, db, book_id, axis=None, value=1.0) -> int:
 # ---------------------------------------------------------------- explain
 
 def cmd_explain(db, *, book_id) -> int:
-    """单书解释：W8 explain 输出透传（book_id 维度；无正文）。"""
-    from reco_core.score import explain
+    """单书解释：装配与打分全在 store/core（与 recommend 同一次装配，#98）。
+
+    修复前这里传空向量给 score.explain，_synthesize 跳过空向量 → 恒 no_features。
+    CLI 只做书号解析与 JSON 序列化，不再自己拼向量。
+    """
+    from reco_store.rank_id import format_rank_book_id, parse_rank_book_id
+    from reco_store.recommend import explain_book
 
     with perf_span("cli.explain"):
+        try:
+            bid = parse_rank_book_id(book_id)
+        except ValueError:
+            print(json.dumps({"error": f"book_id={book_id} 不是合法书号",
+                              "reasons": []}, ensure_ascii=False))
+            return 1
         store = open_store(db)
         try:
-            profile_data = _load_profile(store)
-            # ProfileData → score.Profile 桥接（explain 只读 score 契约面）
-            from reco_core.score import Profile as ScoreProfile
-
-            counts = dict(profile_data.sample_counts)
-            profile = ScoreProfile(
-                weights=tuple(profile_data.weights),
-                sample_counts={"n_pos": int(counts.get("tag_like", 0)),
-                               "n_neg": int(counts.get("tag_dislike", 0))},
-                behavior_signals=dict(profile_data.behavior_signals),
-            )
-            conn = store.read_conn()
-            try:
-                row = conn.execute(
-                    "SELECT book_id, dedup_key FROM books WHERE book_id = ?", (int(book_id),)
-                ).fetchone()
-            finally:
-                conn.close()
-            if row is None:
+            result = explain_book(store, bid)
+            if result["status"] == "unknown_book":
                 print(json.dumps({"error": f"book_id={book_id} 不在特征库",
                                   "reasons": []}, ensure_ascii=False))
                 return 1
-            bid, key = row
-            try:
-                rank_id = format_rank_book_id(bid)
-                reasons = explain([(rank_id, {})],  # score 向量契约：纯 {dim:weight}
-                                  profile, rank_id)
-                status = "ok"
-            except ValueError:
-                # §6.3：特征缺失跳过不静默当 0 分——如实报「无可解释依据」不崩
-                reasons = []
-                status = "no_features"
             payload = {
                 "book_id": format_rank_book_id(bid),
-                "status": status,
+                "status": result["status"],
                 "reasons": [{"axis": r.axis, "contribution": float(r.contribution),
-                             "source": r.source} for r in reasons],
-                "profile": _confidence_dict(profile_data.confidence),
+                             "source": r.source} for r in result["reasons"]],
+                "muted": bool(result["muted"]),
+                "profile": _confidence_dict(_load_profile(store).confidence),
             }
             print(json.dumps(payload, ensure_ascii=False))
             return 0
         finally:
             store.close()
-
 
 # ---------------------------------------------------------------- replay
 

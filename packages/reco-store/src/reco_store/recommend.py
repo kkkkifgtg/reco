@@ -24,6 +24,7 @@ from .rank_id import format_rank_book_id
 
 __all__ = [
     "decode_vector_blob",
+    "explain_book",
     "load_axis_ids",
     "load_book_names",
     "load_books",
@@ -181,6 +182,69 @@ def mute_map_from_store(store) -> dict[str, Any]:
     return mute
 
 
+def _assemble(store) -> dict:
+    """库态 → 一次装配（rank_candidates / explain_book 共用，零复制）。
+
+    候选域 = candidate 专区；正样本向量 = 全库 liked（含同书双区）口径。
+    本层零排序（A6），装配结果原样交给 reco_core。
+    """
+    vectors = load_vectors(store)
+    books = load_books(store)
+    candidate_books = load_candidate_books(store)
+    candidates = [
+        (format_rank_book_id(bid), {"dedup_key": key, "vector": vectors.get(bid, {})})
+        for bid, key in candidate_books
+    ]
+    positive_vectors = tuple(vectors[bid] for bid, _key in books if vectors.get(bid))
+    return {
+        "vectors": vectors,
+        "books": books,
+        "candidates": candidates,
+        "positive_vectors": positive_vectors,
+        "profile": load_profile(store),
+        "mute": mute_map_from_store(store),
+        "n_candidates": len(candidates),
+        "n_vectors": len(positive_vectors),  # 库级：空态区分「是否已生产向量」
+        "n_skipped": max(0, len(candidate_books)
+                         - sum(1 for bid, _key in candidate_books if vectors.get(bid))),
+    }
+
+
+def explain_book(store, book_id, config=None) -> dict:
+    """单书理由解释：与 recommend 走同一次装配，理由逐位一致（#98）。
+
+    修复前 CLI 拿空向量调 score.explain，_synthesize 跳过空向量 → 恒 no_features。
+    这里只把这本书单独交给同一个静音感知入口（similarity/model/behavior 三路
+    都按书计算，与候选集大小无关），不改写任何打分公式。
+    返回 {status, book_id, reasons, muted}；status ∈ ok/no_features/unknown_book。
+    """
+    from reco_core.feedback import rank_only
+
+    bid = int(book_id)
+    a = _assemble(store)
+    keys = dict(a["books"])
+    if bid not in keys:
+        return {"status": "unknown_book", "book_id": bid, "reasons": (), "muted": False}
+    vec = a["vectors"].get(bid)
+    if not vec:
+        return {"status": "no_features", "book_id": bid, "reasons": (), "muted": False}
+    out = rank_only(
+        [(format_rank_book_id(bid), {"dedup_key": keys.get(bid), "vector": vec})],
+        a["profile"], mute=a["mute"], positive_vectors=a["positive_vectors"],
+        config=config,
+    )
+    rows = list(out.get("rank_rows") or ())
+    if not rows:
+        return {"status": "no_features", "book_id": bid, "reasons": (), "muted": False}
+    row = rows[0]
+    return {
+        "status": "ok",
+        "book_id": bid,
+        "reasons": tuple(row.reasons),
+        "muted": row.book_id in set(out.get("muted") or ()),
+    }
+
+
 def rank_candidates(store, config=None) -> dict:
     """唯一装配：库态 → 画像/静音/真实候选向量 → rank_only 唯一入口（A6）。
 
@@ -192,25 +256,14 @@ def rank_candidates(store, config=None) -> dict:
     """
     from reco_core.feedback import rank_only
 
-    vectors = load_vectors(store)
-    books = load_books(store)  # 全库身份：正样本向量口径（liked 仍参与正样本）
-    candidate_books = load_candidate_books(store)  # 候选域：candidate 专区
-    candidates = [
-        (format_rank_book_id(bid), {"dedup_key": key, "vector": vectors.get(bid, {})})
-        for bid, key in candidate_books
-    ]
-    positive_vectors = tuple(
-        vectors[bid] for bid, _key in books if vectors.get(bid)
-    )
-    candidate_vector_count = sum(1 for bid, _key in candidate_books if vectors.get(bid))
-    profile = load_profile(store)
-    mute = mute_map_from_store(store)
-    out = rank_only(candidates, profile, mute=mute, positive_vectors=positive_vectors,
+    a = _assemble(store)
+    out = rank_only(a["candidates"], a["profile"], mute=a["mute"],
+                    positive_vectors=a["positive_vectors"],
                     config=config)  # #82：生成篇数（探索位配额）由此贯通到 rank
     out["names"] = load_book_names(store)
-    out["n_candidates"] = len(candidates)
-    out["n_vectors"] = len(positive_vectors)  # 库级：空态区分「是否已生产向量」
-    out["n_skipped"] = max(0, len(candidate_books) - candidate_vector_count)
+    out["n_candidates"] = a["n_candidates"]
+    out["n_vectors"] = a["n_vectors"]
+    out["n_skipped"] = a["n_skipped"]
     return out
 
 
