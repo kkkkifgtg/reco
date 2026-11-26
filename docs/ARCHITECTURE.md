@@ -726,7 +726,7 @@ score = w_sim × 相似度 + w_model × 分类器输出 + w_behavior × 行为�
    - 身份命中且 (size,mtime_ns) 变 → **内容变化**（重算特征，保留标注）；
    - 仅当前有 → **新增**；
    - 仅上次有 → **删除**（present=0，软删）。
-4. append_event：每类变化写一条事件（file_added/moved/removed/fingerprint_changed），事务内批量写、短事务。
+4. append_event：每类变化写一条事件（file_added/moved/removed/fingerprint_changed），事务内批量写、短事务。GUI 再扫描（`reco_ui.sync`）与 CLI 扫描共用同一个 `classify_delta`，不存在第二套手写差分；移动同时改了内容的，`file_moved` 搬路径、随后的 `file_added` 刷新尺寸与 mtime。
 5. 特征提取：对「新增/变化」的书在**事务外**计算统计量与标签命中，再一次性 upsert；失败（损坏/超大超时）标 quarantined 并记事件，不阻塞整轮。
 6. 画像更新：update_profile 折叠新事件（含 signal_recorded），写 profile_versions。
 7. 推荐生成：rank(...) → 写 rec_runs/recommendations；GUI/CLI 均读同一 run_id。

@@ -481,10 +481,15 @@ def _apply_event(conn: sqlite3.Connection, event: Event) -> None:
         conn.execute("UPDATE files SET present = 0, last_seen_at = ? WHERE path = ?", (at, p["path"]))
     elif t == "file_moved":
         # N1/W19：跨专区移动携带 zone → 同步搬迁专区（COALESCE；不带 zone 保持原专区，向后兼容——旧移动事件可逐位重放，ADR-0003；zone 变更与路径变更同一事件同一事务）。
+        # #106：移动同时改内容时顺带刷新 size/mtime/ext（缺键事件逐位重放不变）。
         conn.execute(
             "UPDATE files SET path = ?, last_seen_at = ?, moved_from_path = ?,"
-            " zone = COALESCE(?, zone) WHERE path = ?",
-            (p["new_path"], at, p["path"], p.get("zone"), p["path"]),
+            " zone = COALESCE(?, zone),"
+            " size_bytes = COALESCE(?, size_bytes),"
+            " mtime_ns = COALESCE(?, mtime_ns),"
+            " ext = COALESCE(?, ext) WHERE path = ?",
+            (p["new_path"], at, p["path"], p.get("zone"),
+             p.get("size_bytes"), p.get("mtime_ns"), p.get("ext"), p["path"]),
         )
     elif t == "tag_added":
         conn.execute(
