@@ -89,5 +89,5 @@ def test_unknown_event_kind_rejected_without_side_effects(store):
     # 两侧一致——拒绝之后投影一个字节都不许变。
     before = _snapshot(store)
     with pytest.raises(ValueError):
-        store.append_event("not_a_labels_event", {}, occurred_at="2026-01-01T00:00:00+00:00")
+        store.record_label_event("not_a_labels_event", {}, occurred_at="2026-01-01T00:00:00+00:00")
     assert _snapshot(store) == before

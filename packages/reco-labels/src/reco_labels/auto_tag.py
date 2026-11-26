@@ -204,9 +204,13 @@ class StoreAdapter:
             moved += 1
         return moved
 
-    def append_event(self, kind: str, payload: Mapping, occurred_at: str,
-                     *, book_id: int | None = None) -> None:
-        """labels 事件 → reco-store 事件词汇分派（payload 只送白名单键，不误映射）。"""
+    def record_label_event(self, kind: str, payload: Mapping, *, occurred_at: str,
+                           book_id: int | None = None) -> None:
+        """labels 事件 → reco-store 事件词汇分派（payload 只送白名单键，不误映射）。
+
+        #108：这是 LabelsStore 协议实现，不是 store 写入的直通——名字与
+        `self._store.append_event` 区分开，避免把「labels 词表」当「store 词表」用。
+        """
         at = str(occurred_at)
         if kind == "relation_updated":
             # 关系图事件：必须带 book_id（relation_graphs 以 book_id 为主键）
@@ -508,14 +512,14 @@ def _persist_relation_graph(store, book_id: int, stats, hits, *, now: str) -> No
 
     weights = {hit.tag_id: float(hit.confidence) for hit in hits}
     graph = extract_relation_graph(_stats_mapping(stats), weights)
-    store.append_event(
+    store.record_label_event(
         "relation_updated",
         {
             "graph_json": json.dumps(graph, ensure_ascii=False, sort_keys=True),
             "extractor_version": "reco-relations/1",
             "confidence": float(graph.get("evidence", {}).get("confidence", 0.0)),
         },
-        now,
+        occurred_at=now,
         book_id=int(book_id),
     )
 

@@ -50,7 +50,7 @@ def propose_tags(store: LabelsStore, cooccurrence, *, threshold: int,
             kind="tag", candidate=candidate, payload=payload,
             created_at=at,
         )
-        store.append_event("tag_proposed", {
+        store.record_label_event("tag_proposed", {
             "candidate": candidate, "count": count, "threshold": threshold,
         }, occurred_at=at)
         proposals.append(TagProposal(candidate=candidate, count=count,
@@ -126,7 +126,7 @@ def propose_alias_tags(store, candidates, *, threshold: int,
                      "threshold": int(threshold), "tag_id": str(tag_id)},
             created_at=at,
         )
-        store.append_event("tag_proposed", {
+        store.record_label_event("tag_proposed", {
             "candidate": candidate, "count": int(count), "threshold": int(threshold),
         }, occurred_at=at)
         proposals.append(TagProposal(candidate=candidate, count=int(count),
@@ -160,7 +160,7 @@ def accept_proposal(store: LabelsStore, candidate: str, *, axis: str,
         # #83 追加语义：新变体并入既有别名表，绝不整体替换（保护种子/已确认别名）
         set_aliases(store, target, (*current.aliases, candidate))
         store.update_proposal_status(row.proposal_id, "accepted")
-        store.append_event("proposal_accepted", {
+        store.record_label_event("proposal_accepted", {
             "candidate": candidate, "tag_id": target, "kind": "alias",
         }, occurred_at=at)
         return next(r for r in store.iter_tags() if r.tag_id == target)
@@ -173,7 +173,7 @@ def accept_proposal(store: LabelsStore, candidate: str, *, axis: str,
     if kept:
         set_aliases(store, final_tag_id, kept)
     store.update_proposal_status(pending[0].proposal_id, "accepted")
-    store.append_event("proposal_accepted", {
+    store.record_label_event("proposal_accepted", {
         "candidate": candidate, "tag_id": final_tag_id,
     }, occurred_at=at)
     return next(r for r in store.iter_tags() if r.tag_id == final_tag_id)
@@ -189,7 +189,7 @@ def reject_proposal(store: LabelsStore, candidate: str,
     if not pending:
         raise ValueError(f"无 pending 提案: {candidate}")
     store.update_proposal_status(pending[0].proposal_id, "rejected")
-    store.append_event("proposal_rejected", {"candidate": candidate}, occurred_at=at)
+    store.record_label_event("proposal_rejected", {"candidate": candidate}, occurred_at=at)
 
 
 def _auto_tag_id(store: LabelsStore, candidate: str, axis: str) -> str:

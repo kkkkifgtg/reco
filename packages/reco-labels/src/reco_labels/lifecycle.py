@@ -24,7 +24,7 @@ def add_tag(store: LabelsStore, *, tag_id: str, axis: str, label: str,
         created_at=at,
     )
     store.upsert_tag(row)
-    store.append_event("tag_created", {
+    store.record_label_event("tag_created", {
         "tag_id": tag_id, "axis": axis, "created_by": "user",
     }, occurred_at=at)
     return row
@@ -74,7 +74,7 @@ def merge_tags(store: LabelsStore, source_tag: str, target_tag: str, *,
         created_by=src.created_by, created_at=src.created_at,
     )
     store.upsert_tag(merged_row)
-    store.append_event("tag_merged", {
+    store.record_label_event("tag_merged", {
         "source": source_tag, "target": target_tag,
         "redirected_rows": redirected,
     }, occurred_at=resolve(now))
@@ -93,5 +93,5 @@ def archive_tag(store: LabelsStore, tag_id: str, now: str = "") -> TagRow:
         created_by=row.created_by, created_at=row.created_at,
     )
     store.upsert_tag(archived)
-    store.append_event("tag_archived", {"tag_id": tag_id}, occurred_at=resolve(now))
+    store.record_label_event("tag_archived", {"tag_id": tag_id}, occurred_at=resolve(now))
     return archived

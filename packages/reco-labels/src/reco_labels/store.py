@@ -89,7 +89,14 @@ class ProposalRow:
 
 @runtime_checkable
 class LabelsStore(Protocol):
-    """窄协议：reco_labels 运行所需的全部存储能力。"""
+    """窄协议：reco_labels 运行所需的全部存储能力。
+
+    #108：`record_label_event` 与 `reco_store.Store.append_event` 是**两层**，
+    所以名字必须不同——store 层写事件词表、返回自增 id、要求
+    config_fingerprint/actor；本层只收 labels 词表（`EVENT_KINDS`），由适配器
+    分派映射，不返回 id，也不保证一一对应（tag_created/tag_proposed 已由写
+    方法落库，这里折叠为 no-op）。同名会让人以为是一次直通转发。
+    """
 
     def iter_tags(self) -> Iterable[TagRow]: ...
     def iter_aliases(self) -> Iterable[tuple[str, str, str]]: ...  # (alias, tag_id, source)
@@ -100,8 +107,8 @@ class LabelsStore(Protocol):
     def record_book_tag(self, book_id: int, tag_id: str, *, source: str,
                         confidence: float, basis_json: str, updated_at: str) -> None: ...
     def redirect_book_tag_rows(self, source_tag: str, target_tag: str) -> int: ...
-    def append_event(self, kind: str, payload: Mapping[str, object],
-                     occurred_at: str, *, book_id: int | None = None) -> None: ...
+    def record_label_event(self, kind: str, payload: Mapping[str, object], *,
+                           occurred_at: str, book_id: int | None = None) -> None: ...
     def insert_proposal(self, kind: str, candidate: str,
                         payload: Mapping[str, object], created_at: str) -> str: ...
     def update_proposal_status(self, proposal_id: str, status: str) -> None: ...
@@ -176,8 +183,8 @@ class InMemoryLabelsStore:
             moved += 1
         return moved
 
-    def append_event(self, kind: str, payload: Mapping[str, object],
-                     occurred_at: str, *, book_id: int | None = None) -> None:
+    def record_label_event(self, kind: str, payload: Mapping[str, object], *,
+                           occurred_at: str, book_id: int | None = None) -> None:
         if kind not in EVENT_KINDS:
             raise ValueError(f"未知事件类型: {kind}")
         self._s.event_seq += 1
