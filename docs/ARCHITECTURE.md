@@ -19,7 +19,8 @@
 3. **阅读器**：GUI 已内建 txt/md、EPUB、DOCX、PDF 阅读页；位置写入独立 `reading_progress` 表，行为信号写 `signal_recorded` 事件。§17 Q12 的「不内建」是历史裁定，已被后续实现取代。
 4. **阅读信号**：`dwell`、`completion`、`reopen` 参与画像行为折叠；`read_time` 当前只采集，不产生画像效应。
 5. **依赖**：以 `uv.lock` 与 `docs/DEPENDENCIES.md` 为准。jieba/pkuseg 是标签挖掘的可选分词器，不再适用早期「不引入 jieba」的依赖结论。
-6. **测试**：当前全仓基线为 `737 passed / 2 failed / 4 skipped`（2026-11-25，离屏模式）；两处失败均位于 `tests/test_extract_closed_loop.py`，为本次统稿之前既有的缺陷（与文档变更无关，另行跟踪）；历史验收与复盘中的 379/384 均是其当时快照。
+6. **文本口径**：解码（BOM → utf-8 → gb18030 严格）、HTML 剥离（线性、无回溯）与 EPUB spine 顺序只有一份实现，在 `reco_io.textkit`；阅读器、特征提取与标签挖掘都从这里取。长书的重复短语比与 n-gram 桶只吃前 100 万非空白字符（`DEFAULT_REPEAT_WINDOW_CHARS`，确定性前缀），`char_count` 等统计量吃全文。
+7. **测试**：当前全仓基线为 `737 passed / 2 failed / 4 skipped`（2026-11-25，离屏模式）；两处失败均位于 `tests/test_extract_closed_loop.py`，为本次统稿之前既有的缺陷（与文档变更无关，另行跟踪）；历史验收与复盘中的 379/384 均是其当时快照。
 
 下文保留决策形成时的调研与论证；涉及上述六项的旧结论不覆盖本清单。
 

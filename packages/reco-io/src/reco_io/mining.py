@@ -74,12 +74,13 @@ def merge_simplified_counts_with_variants(
 
 
 def _decode_text(path: Path) -> str:
-    """格式解码：容器格式复用 features._READERS；txt/md 走 utf-8→gb18030 链。
+    """格式解码：容器格式复用 features._READERS，纯文本走 textkit 的唯一解码链。
 
-    与 reco-ui.reader 同一先例（跨包复用 features 的读取器接缝）；任何解码
-    失败都诚实返回空串（调用方得到 {}，与提取降级口径一致），不猜内容。
+    与阅读器、提取层同一条链（BOM → utf-8 → gb18030，统一 LF）；任何解码失败都
+    诚实返回空串（调用方得到 {}，与提取降级口径一致），不猜内容。
     """
     from reco_io.features import _READERS  # noqa: SLF001——既有跨包先例（reader.py）
+    from reco_io.textkit import decode_bytes
 
     try:
         reader = _READERS.get(path.suffix.lower())
@@ -89,9 +90,6 @@ def _decode_text(path: Path) -> str:
     except (OSError, ValueError, UnicodeDecodeError, RuntimeError):
         return ""
     try:
-        return raw.decode("utf-8")
+        return decode_bytes(raw)
     except UnicodeDecodeError:
-        try:
-            return raw.decode("gb18030")
-        except UnicodeDecodeError:
-            return ""
+        return ""
