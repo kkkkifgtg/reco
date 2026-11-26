@@ -56,15 +56,6 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _parse_json_object(raw) -> dict:
-    """payload_json → 字典；损坏/非对象一律降级为空字典（读路径不抛）。"""
-    try:
-        payload = json.loads(raw or "{}")
-    except (TypeError, ValueError):
-        return {}
-    return dict(payload) if isinstance(payload, Mapping) else {}
-
-
 class StoreAdapter:
     """reco_store.Store → LabelsStore 窄协议适配（W5 对接位；只读视图 + 写转发）。
 
@@ -149,21 +140,13 @@ class StoreAdapter:
 
     def iter_proposals(self) -> Iterable[ProposalRow]:
         """读 proposals 投影：candidate 不在真实列里（schema 无该列），从 payload_json 取。"""
-        conn = self._store.read_conn()
-        try:
-            rows = conn.execute(
-                "SELECT proposal_id, kind, payload_json, status, created_at"
-                " FROM proposals ORDER BY json_extract(payload_json, '$.count') DESC,"
-                " json_extract(payload_json, '$.candidate') ASC"
-            ).fetchall()
-        finally:
-            conn.close()
-        for proposal_id, kind, payload_json, status, created_at in rows:
-            payload = _parse_json_object(payload_json)
+        from reco_store.proposals import iter_proposals as _iter_proposals
+
+        for row in _iter_proposals(self._store):
             yield ProposalRow(
-                proposal_id=str(proposal_id), kind=str(kind), payload=payload,
-                status=str(status), created_at=str(created_at),
-                candidate=str(payload.get("candidate") or ""),
+                proposal_id=row["proposal_id"], kind=row["kind"], payload=row["payload"],
+                status=row["status"], created_at=row["created_at"],
+                candidate=row["candidate"],
             )
 
     def iter_events(self) -> Iterable:

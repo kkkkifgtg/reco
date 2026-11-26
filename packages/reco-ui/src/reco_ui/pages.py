@@ -970,23 +970,20 @@ def proposal_rows(store) -> list[dict]:
     """
     if store is None:
         return []
-    from reco_labels.auto_tag import StoreAdapter
+    from reco_store.proposals import pending_proposals
 
-    adapter = StoreAdapter(store)
     rows: list[dict] = []
-    for p in adapter.iter_proposals():
-        if p.status != "pending":
-            continue
-        payload = dict(p.payload or {})
+    for p in pending_proposals(store):
+        payload = dict(p["payload"] or {})
         rows.append({
-            "proposal_id": p.proposal_id,
-            "candidate": str(payload.get("candidate") or p.candidate or ""),
+            "proposal_id": p["proposal_id"],
+            "candidate": str(payload.get("candidate") or p["candidate"] or ""),
             "count": int(payload.get("count") or 0),
             "threshold": int(payload.get("threshold") or 0),
-            "kind": p.kind,
-            "status": p.status,
-            "created_at": p.created_at,
+            "kind": p["kind"],
+            "status": p["status"],
+            "created_at": p["created_at"],
         })
-    # #90：顺序由 StoreAdapter.iter_proposals 的 SQL 保证（count 降序）——
+    # #90：顺序由 reco_store.proposals 的 SQL 保证（count 降序），
     # A6 静态守护：reco_ui 层零排序，排序一律在数据层完成。
     return rows
