@@ -407,7 +407,7 @@ COMPARE_TABLES: tuple[str, ...] = (
     "volumes", "files", "books", "features", "feature_vectors", "tags",
     "tag_aliases", "book_tags", "relation_graphs", "relation_fields",
     "signals", "events", "profile_versions", "rec_runs", "recommendations",
-    "mutes",
+    "mutes", "proposals",
 )
 
 
@@ -936,13 +936,15 @@ _DUMP_SQL: dict[str, str] = {
     "rec_runs": "SELECT * FROM rec_runs ORDER BY rowid",
     "recommendations": "SELECT * FROM recommendations ORDER BY rowid",
     "mutes": "SELECT * FROM mutes ORDER BY rowid",
+    # #111：proposals 过去不在比对面——重放漂移在审核列表上不可见。
+    "proposals": "SELECT * FROM proposals ORDER BY rowid",
 }
 
 
 def _dump_rows(db_path: str | Path, table: str) -> list[tuple]:
     """整表快照（重放比对用）：语句取自**常量映射**，不做任何字符串拼接。
 
-    重放比对需遍历 15 张表，而 SQLite 不支持参数化标识符；这里把每条语句
+    重放比对需遍历 COMPARE_TABLES 全部表，而 SQLite 不支持参数化标识符；这里把每条语句
     预先写成常量字面量，表名只用作字典键——无拼接、无用户输入路径
     （Code Scanning #6/#7 的消除方式）。
     """

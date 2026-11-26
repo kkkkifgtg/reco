@@ -77,7 +77,7 @@ def _scalar(raw, sql: str, params=()):
 
 
 def _db_conn_rows(db_path, table: str):
-    """逐位行快照（proposals/tags 不在 COMPARE_TABLES 时的显式重放比对）。"""
+    """逐位行快照（独立于 verify_replay 的第二证据，保留）。"""
     conn = sqlite3.connect(db_path)
     try:
         return conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
@@ -129,7 +129,7 @@ def test_auto_tag_new_words_land_pending_proposals_on_real_store(tmp_path):
         assert set(payload) == {"kind", "payload_json", "evidence_json"}
         assert json.loads(payload["payload_json"])["candidate"] in {"夺舍", "摄心术"}
     assert raw.verify_replay().ok
-    # 提案内容逐位可重建（proposals 不在 COMPARE_TABLES，显式比对）
+    # 提案内容逐位可重建（#111 起 proposals 也在 COMPARE_TABLES 内；这里再显式比一遍）
     target = tmp_path / "rebuilt-proposals.db"
     rebuild_projections(target, raw.read_events())
     assert _db_conn_rows(target, "proposals") == _db_conn_rows(raw.path, "proposals")

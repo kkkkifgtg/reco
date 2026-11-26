@@ -35,6 +35,7 @@ __all__ = [
     "cmd_feedback",
     "cmd_recommend",
     "cmd_replay",
+    "cmd_unmute",
     "cmd_report",
     "cmd_scan",
     "mute_map_from_store",
@@ -333,6 +334,32 @@ def cmd_feedback(kind, *, db, book_id, axis=None, value=1.0) -> int:
                                   "book_id": int(book_id)}, ensure_ascii=False))
                 return 0
             print(receipt["display"])  # C7 文案透传（已调整：X 维度权重已下调/上调）
+            return 0
+        finally:
+            store.close()
+
+
+def cmd_unmute(db, *, book_id) -> int:
+    """人工解除静音（#111：release_mute 的第一个生产调用方）。
+
+    静音到期由读侧过滤（feedback 层），这里给「用户改主意」一条显式出口：
+    写 mute_released 事件，投影零残留，之后 recommend/explain 立刻不再标 muted。
+    """
+    from reco_store.feedback import release_feedback
+    from reco_store.rank_id import format_rank_book_id, parse_rank_book_id
+
+    with perf_span("cli.unmute"):
+        bid = parse_rank_book_id(book_id)
+        if bid is None:
+            print(json.dumps({"error": f"book_id={book_id} 不是合法书号",
+                              "status": "rejected"}, ensure_ascii=False))
+            return 1
+        store = open_store(db)
+        try:
+            receipt = release_feedback(store, bid)
+            print(json.dumps({"status": "ok",
+                              "book_id": format_rank_book_id(bid),
+                              "event_id": receipt["event_id"]}, ensure_ascii=False))
             return 0
         finally:
             store.close()

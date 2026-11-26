@@ -199,6 +199,12 @@ def _open_and_wait(page, path, book_id) -> None:
     page.open_book(path, book_id)
     assert _pump_until(lambda: page.loaded or page.status_text != "加载中…"), "open 超时"
     assert page.loaded, page.status_text
+    # #73：打开即写一条 reopen 信号（池线程）。predicate 只在事件泵之后判，
+    # worker 可能刚好还在跑；采样事件数前先泄洪，否则「进度零事件」会间歇性
+    # 数到这条 reopen（与进度无关）。
+    from reco_ui.qt import QThreadPool
+
+    QThreadPool.globalInstance().waitForDone(15000)
 
 
 # ---------------------------------------------------------- 导出面

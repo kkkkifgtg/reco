@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Mapping
 
-__all__ = ["DEFAULT_FEEDBACK_FP", "record_feedback"]
+__all__ = ["DEFAULT_FEEDBACK_FP", "record_feedback", "release_feedback"]
 
 DEFAULT_FEEDBACK_FP = "store/feedback/1"
 
@@ -58,6 +58,37 @@ def record_feedback(
         )
         receipt["mute_window"] = window
     return receipt
+
+
+def release_feedback(
+    store, book_id, *, now=None, config_fingerprint: str = DEFAULT_FEEDBACK_FP,
+    actor: str = "user",
+) -> dict:
+    """人工解除静音：mute_released 事件 + 投影零残留；返回回执。
+
+    静音到期是读侧过滤（feedback 层判定），但「用户改主意、想提前放出来」
+    需要显式出口——#111 清点时 release_mute 在生产里没有任何调用方，
+    静音只能等过期。解除走同一入口，CLI/GUI 只渲染回执。
+    """
+    at = _now_iso(now)
+    event_id = store.release_mute(
+        int(book_id), occurred_at=at, config_fingerprint=config_fingerprint,
+        actor=actor,
+    )
+    return {
+        "kind": "unmute",
+        "book_id": int(book_id),
+        "event_id": int(event_id),
+        "display": "已解除静音：这本可以重新出现在推荐里",
+    }
+
+
+def _now_iso(now) -> str:
+    if now is None:
+        from datetime import datetime, timezone
+
+        return datetime.now(timezone.utc).isoformat()
+    return now.isoformat() if hasattr(now, "isoformat") else str(now)
 
 
 def _dedup_key_of(store, book_id: int) -> str | None:

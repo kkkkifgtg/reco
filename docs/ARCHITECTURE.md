@@ -14,15 +14,16 @@
 
 ## 当前实现口径（2026-11-25）
 
-1. **生产向量**：`reco_io.extract` 使用字符 2–3gram 哈希桶计数、Top-64、L2 归一；没有调用 IDF。`feature_vectors.idf_version` 保留旧列名，当前写 `reco-ngram-counts/1`。`reco_core.vectorize` 的语料级 TF-IDF 是独立可用实现，不是当前生产入口。
+1. **生产向量**：`reco_io.extract` 使用字符 2–3gram 哈希桶计数、Top-64、L2 归一；没有调用 IDF。`feature_vectors.idf_version` 保留旧列名，当前写 `reco-ngram-counts/1`。`reco_core.vectorize` 的语料级 TF-IDF 已删除（#111 清点：生产零调用方，且与「不计算 IDF」这条口径相矛盾）。
 2. **正样本口径**：相似度质心 = liked 专区中已产出特征向量的作品（按 book_id 去重），与 CONTEXT.md「正样本 = liked/ 中的作品」一致；candidate 与推荐专区不进质心，因此候选区扩容不会静默改动已有书的分数（#102 已收敛）。`rank_candidates` 额外返回 `n_positive`（质心成员数）与 `n_vectors`（库级有向量书数，空态文案依据）。
 3. **阅读器**：GUI 已内建 txt/md、EPUB、DOCX、PDF 阅读页；位置写入独立 `reading_progress` 表，行为信号写 `signal_recorded` 事件。§17 Q12 的「不内建」是历史裁定，已被后续实现取代。
 4. **阅读信号**：`dwell`、`completion`、`reopen` 参与画像行为折叠；`read_time` 当前只采集，不产生画像效应。
 5. **依赖**：以 `uv.lock` 与 `docs/DEPENDENCIES.md` 为准。jieba/pkuseg 是标签挖掘的可选分词器，不再适用早期「不引入 jieba」的依赖结论。
 6. **文本口径**：解码（BOM → utf-8 → gb18030 严格）、HTML 剥离（线性、无回溯）与 EPUB spine 顺序只有一份实现，在 `reco_io.textkit`；阅读器、特征提取与标签挖掘都从这里取。长书的重复短语比与 n-gram 桶只吃前 100 万非空白字符（`DEFAULT_REPEAT_WINDOW_CHARS`，确定性前缀），`char_count` 等统计量吃全文。
-7. **测试**：当前全仓基线为 `737 passed / 2 failed / 4 skipped`（2026-11-25，离屏模式）；两处失败均位于 `tests/test_extract_closed_loop.py`，为本次统稿之前既有的缺陷（与文档变更无关，另行跟踪）；历史验收与复盘中的 379/384 均是其当时快照。
+7. **测试**：当前全仓基线为 `840 passed / 4 skipped`（2026-11-26，离屏模式；跳过项为 torch 未安装、Windows 符号链接权限、两个 POSIX 权限用例）；历史验收与复盘中的 379/384 等数字均是其当时快照。
+8. **重放比对面与静音出口**：#111 起 `proposals` 进 `COMPARE_TABLES`（重放漂移不再只在审核列表上不可见）；静音解除有了生产路径——`reco_store.feedback.release_feedback` 写 `mute_released`，CLI `unmute` 是它的第一个调用方，用户不必等静音到期。
 
-下文保留决策形成时的调研与论证；涉及上述六项的旧结论不覆盖本清单。
+下文保留决策形成时的调研与论证；涉及上述各项的旧结论不覆盖本清单。
 
 ---
 
