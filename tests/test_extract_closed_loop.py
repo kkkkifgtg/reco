@@ -116,8 +116,11 @@ def test_cli_extract_is_idempotent(tmp_path, capsys):
     # 幂等性用「提案表逐行不变」来断言，而不是拿两轮摘要整体相等。
     assert _rows(db, "proposals") == first_proposals
     assert second_summary["proposals"] == 0
-    for key in ("total", "ok", "failed", "vectors"):
-        assert second_summary[key] == first_summary[key], key
+    # #109：第二轮全部命中重算门——不重算、不追加事件
+    assert second_summary["total"] == first_summary["total"] == 2
+    assert second_summary["skipped"] == 2
+    assert second_summary["ok"] == second_summary["vectors"] == 0
+    assert second_summary["failed"] == 0
     # 特征向量（纯函数）逐行相等；features.computed_at 是「本次计算时刻」，随事件推进
     assert _rows(db, "feature_vectors") == first_vectors
     second_features = _rows(db, "features")

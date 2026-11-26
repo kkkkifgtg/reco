@@ -26,8 +26,10 @@ payload 契约（键集恰为 store._ALLOWED_KEYS 白名单内的下列键，不
   sqrt(Σcount²)（余弦用它还原尺度）。无向量（空/降级）时 dim=0、空 blob，
   调用方不写 vector_computed（decode_vector_blob 对 dim=0 显式 ValueError）。
 
-幂等：payload 是 (文件内容, extractor_version) 的纯函数；重跑只追加事件，
-投影按 book_id upsert → 两表行值与行数不变（事件流 append-only，ADR-0003）。
+幂等：payload 是 (文件内容, extractor_version) 的纯函数；投影按 book_id upsert →
+两表行值与行数不变（事件流 append-only，ADR-0003）。#109 起还有重算门：
+(extractor_version, source_mtime_ns, 扫描时 size_bytes) 都没变就直接跳过、
+一条事件也不追加；force=True 可强制重算。
 坏文件（解码失败/坏容器/超时/不可读）降级为诚实空值（stats_json="{}"、
 空哈希桶、不写向量），不抛异常、不猜内容。
 """
@@ -68,6 +70,7 @@ class ExtractResult:
     dim: int
     norm: float
     source_mtime_ns: int | None
+    skipped: bool = False  # True = 文件与提取口径都没变，本轮没有追加任何事件
 
 
 def _char_slot(char: str) -> int:
@@ -149,6 +152,35 @@ def _unreadable_result() -> FeatureResult:
     )
 
 
+def _unchanged(store, book_id: int, path, st) -> bool:
+    """重算门：提取器版本、来源 mtime、扫描时大小三者都未变才跳过（#109）。
+
+    三者缺一不可——只看 mtime 会漏掉「换了文件但 mtime 被复制保留」的替换，
+    只看大小会漏掉同尺寸改字。扫描行不存在时视为必须重算（无法证明未变）。
+    """
+    conn = store.read_conn()
+    try:
+        feature_row = conn.execute(
+            "SELECT extractor_version, source_mtime_ns FROM features WHERE book_id = ?",
+            (int(book_id),),
+        ).fetchone()
+        file_row = conn.execute(
+            "SELECT size_bytes FROM files WHERE book_id = ? AND path = ? AND present = 1",
+            (int(book_id), str(path)),
+        ).fetchone()
+    finally:
+        conn.close()
+    if feature_row is None or file_row is None:
+        return False
+    version, recorded_mtime = feature_row[0], feature_row[1]
+    return (
+        str(version) == EXTRACTOR_VERSION
+        and recorded_mtime is not None
+        and int(recorded_mtime) == int(st.st_mtime_ns)
+        and int(file_row[0]) == int(st.st_size)
+    )
+
+
 def extract_and_record(
     store,
     book_id: int,
@@ -156,15 +188,26 @@ def extract_and_record(
     *,
     now: str,
     config_fingerprint: str,
+    force: bool = False,
 ) -> ExtractResult:
     """单本提取 → 两条事件落库；幂等（payload 纯函数 + 投影 upsert）。
 
+    重算门（#109）：文件与提取口径都没变时直接跳过、不追加事件——事件流是
+    append-only 的历史，重复扫描不该往里灌噪声。force=True 可强制重算。
     坏文件/不可读降级为空值并照常记 features_computed（可审计），不写向量、
     不抛异常；整轮批处理不因单本中断（§8 第 5 步）。
     """
     source_mtime_ns: int | None = None
+    st = None
     try:
-        source_mtime_ns = os.stat(path, follow_symlinks=False).st_mtime_ns
+        st = os.stat(path, follow_symlinks=False)
+        source_mtime_ns = int(st.st_mtime_ns)
+        if not force and _unchanged(store, book_id, path, st):
+            return ExtractResult(
+                book_id=book_id, quality_flag="unchanged", stats_complete=True,
+                vector_written=False, dim=0, norm=0.0,
+                source_mtime_ns=source_mtime_ns, skipped=True,
+            )
         fr = extract_features(Path(path))
     except OSError:
         fr = _unreadable_result()

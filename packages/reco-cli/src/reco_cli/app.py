@@ -208,7 +208,9 @@ def cmd_extract(db, *, limit=None) -> int:
       未知高频词/谐音形近变体进 proposals 待确认）；
     - 无可用文件/降级（undecodable/corrupt_container/pending_timeout/
       unreadable）如实计 failed，整轮不中断；
-    - stdout 只输出 JSON 摘要 {total, ok, failed, vectors, tagged, proposals}（无正文）。
+    - #109 重算门：文件与提取器都没变的书直接跳过（skipped），第二轮提取不再追加
+      事件、也不再重复打标；
+    - stdout 只输出 JSON 摘要 {total, ok, skipped, failed, vectors, tagged, proposals}（无正文）。
     """
     from reco_io.extract import extract_and_record
 
@@ -218,7 +220,7 @@ def cmd_extract(db, *, limit=None) -> int:
             groups = _present_files_by_book(store)
             zones = _book_zones(store)
             now = _utc_now_iso()
-            total = ok = failed = vectors = tagged = proposals = 0
+            total = ok = skipped = failed = vectors = tagged = proposals = 0
             for book_id, files in groups.items():
                 if limit is not None and total >= limit:
                     break
@@ -231,6 +233,9 @@ def cmd_extract(db, *, limit=None) -> int:
                     store, book_id, path, now=now,
                     config_fingerprint=EXTRACT_CONFIG_FP,
                 )
+                if result.skipped:
+                    skipped += 1
+                    continue
                 if result.vector_written:
                     vectors += 1
                 if result.quality_flag in _EXTRACT_OK_FLAGS:
@@ -249,9 +254,10 @@ def cmd_extract(db, *, limit=None) -> int:
                     except Exception as exc:
                         print(f"warn: 自动打标失败 book={book_id} "
                               f"({type(exc).__name__}: {exc})", file=sys.stderr)
-            print(json.dumps({"total": total, "ok": ok, "failed": failed,
-                              "vectors": vectors, "tagged": tagged,
-                              "proposals": proposals}, ensure_ascii=False))
+            print(json.dumps({"total": total, "ok": ok, "skipped": skipped,
+                              "failed": failed, "vectors": vectors,
+                              "tagged": tagged, "proposals": proposals},
+                             ensure_ascii=False))
             return 0
         finally:
             store.close()

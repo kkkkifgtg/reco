@@ -77,7 +77,7 @@ def test_extract_summary_is_json_with_exact_keys(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     summary = json.loads(out)  # stdout 纯净 JSON
-    assert set(summary) == {"total", "ok", "failed", "vectors", "tagged", "proposals"}
+    assert set(summary) == {"total", "ok", "skipped", "failed", "vectors", "tagged", "proposals"}
     # #83：candidate 专区也打标；样本文本无标签词 → tagged=0；
     # 未知内容词（count>=3）进提案（具体数量随分词词表变化，只下界断言）
     assert summary["tagged"] == 0 and summary["proposals"] >= 1
@@ -125,7 +125,7 @@ def test_extract_empty_only_book_counts_failed_not_crash(tmp_path, capsys):
 
     assert rc == 0
     assert json.loads(capsys.readouterr().out) == {"total": 1, "ok": 0, "failed": 1,
-                                                   "vectors": 0, "tagged": 0, "proposals": 0}
+                                                   "vectors": 0, "tagged": 0, "proposals": 0, "skipped": 0}
     assert _count(db, "feature_vectors") == 0
 
 
@@ -138,7 +138,7 @@ def test_extract_missing_file_counts_failed(tmp_path, capsys):
 
     assert main(["extract", "--db", str(db)]) == 0
     assert json.loads(capsys.readouterr().out) == {"total": 1, "ok": 0, "failed": 1,
-                                                   "vectors": 0, "tagged": 0, "proposals": 0}
+                                                   "vectors": 0, "tagged": 0, "proposals": 0, "skipped": 0}
     assert _count(db, "features") == 0  # 文件缺失：打标同样无从谈起
 
 
