@@ -19,12 +19,14 @@ from reco_ui.qt import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QPushButton,
     QSpinBox,
     QStackedWidget,
     QTableView,
     QThreadPool,
     QTimer,
+    Qt,
     QVBoxLayout,
     QWidget,
     pyqtSignal,
@@ -37,6 +39,8 @@ from reco_ui.pages import (
     ZoneLoader,
     ZonePage,
     recommend_empty_text,
+    run_tag_editor,
+    tag_edit_status,
     zone_meta,
     zone_page_rows,
 )
@@ -655,6 +659,9 @@ class RecommendPage(QWidget):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         # 双击推荐行 → 打开阅读页（与 liked/candidate 专区页同一交互）
         self.table.doubleClicked.connect(self._on_double_clicked)
+        # #121：推荐行右键也能改标签——推荐是标签错误最刺眼的地方
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_context_menu)
         layout.addWidget(self.table, 1)
         # T4 空态提示：无 rank 行时显示明确文案（缺向量 vs 候选为空）
         self._empty = QLabel("")
@@ -706,6 +713,37 @@ class RecommendPage(QWidget):
             self._status.setText("文件缺失，无法打开：该作品在本机已不存在")
             return
         self.reader_requested.emit(path, book_id)
+
+    # —— #121：推荐行右键改标签 ——
+    def build_context_menu(self, book_id: int | None = None) -> QMenu:
+        """每次新构建（坑 7 幂等）；无书号（空白处右键）给空菜单。"""
+        menu = QMenu(self)
+        if book_id is not None:
+            menu.addAction("编辑标签…")
+        return menu
+
+    def _on_context_menu(self, pos) -> None:
+        index = self.table.indexAt(pos)
+        if index is None or not index.isValid():
+            return
+        book_id = self._parse_rank_book_id(self._model.book_id_at(index.row()))
+        if book_id is None:
+            return
+        menu = self.build_context_menu(book_id)
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen is not None and chosen.text() == "编辑标签…":
+            self.open_tag_editor(book_id)
+
+    def open_tag_editor(self, book_id: int) -> None:
+        """打开「编辑标签」并落库；结果写状态行（写失败不装成功）。"""
+        if self._store is None:
+            return
+        try:
+            outcome = run_tag_editor(self._store, book_id, parent=self)
+        except Exception as exc:
+            self._status.setText(f"标签保存失败：{exc}")
+            return
+        self._status.setText(tag_edit_status(outcome))
 
     def set_rows(self, rows, names=None) -> None:
         self._model.set_rows(rows, names)

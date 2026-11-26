@@ -164,8 +164,8 @@ def test_profile_inflight_second_request_is_not_swallowed(qapp, store, monkeypat
 def test_zone_menu_build_idempotent(qapp, store):
     """坑 7：QMenu 构建幂等——重复构建不崩、每次新实例、动作数稳定。
 
-    #80：候选池右键菜单已无「标为喜欢」「不合口味」，故候选池动作为空；
-    喜欢专区仍保留「移到候选池」。
+    #80：「标为喜欢」「不合口味」已移到阅读界面，列表层不再提供。
+    #121：右键菜单接上了「编辑标签…」——动作随书号而来；空白处（无书号）为空。
     """
     from reco_ui.pages import ZonePage
 
@@ -181,6 +181,6 @@ def test_zone_menu_build_idempotent(qapp, store):
 
     liked = ZonePage("liked", store)
     liked.load_now()
-    m3 = liked.build_context_menu()
-    assert [a.text() for a in m3.actions()] == ["移到候选池"]
+    m3 = liked.build_context_menu(1)
+    assert [a.text() for a in m3.actions()] == ["编辑标签…"]
     m3.deleteLater()

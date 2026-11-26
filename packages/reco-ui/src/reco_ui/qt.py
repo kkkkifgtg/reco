@@ -20,6 +20,7 @@ from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPalette, QPixmap, QTe
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -51,6 +52,7 @@ __all__ = [
     "QAction",
     "QApplication",
     "QColor",
+    "QDialog",
     "QFrame",
     "QGridLayout",
     "QHBoxLayout",
