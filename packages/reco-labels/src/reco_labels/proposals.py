@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from reco_labels.clock import resolve
@@ -23,6 +24,7 @@ class TagProposal:
 
 
 def propose_tags(store: LabelsStore, cooccurrence, *, threshold: int,
+                 variants: Mapping[str, Sequence[str]] | None = None,
                  now: str = "") -> tuple:
     at = resolve(now)
     existing_pending = {
@@ -36,9 +38,13 @@ def propose_tags(store: LabelsStore, cooccurrence, *, threshold: int,
             continue
         if candidate in known_tags or candidate in existing_pending:
             continue  # 已知标签/已在 pending → 不重复写
+        payload = {"candidate": candidate, "count": count, "threshold": threshold}
+        # #92：把简体归一吞掉的繁体原形带上——采纳时登记为该标签的别名。
+        kept = [str(v) for v in (variants or {}).get(candidate, ()) if str(v).strip()]
+        if kept:
+            payload["variants"] = kept
         proposal_id = store.insert_proposal(
-            kind="tag", candidate=candidate,
-            payload={"candidate": candidate, "count": count, "threshold": threshold},
+            kind="tag", candidate=candidate, payload=payload,
             created_at=at,
         )
         store.append_event("tag_proposed", {
@@ -130,6 +136,8 @@ def accept_proposal(store: LabelsStore, candidate: str, *, axis: str,
 
     #83 起值行显示名参与识别：tag 类采纳即自动可识别；alias 类采纳后该词
     经 set_aliases 升级为原标签的识别词——两条路都不再需要二次补 alias。
+    #92：tag 类提案 payload 若带繁体原形（variants），采纳时一并登记为该标签
+    的别名——简体归一不该把用户嘴里的写法丢掉。
     """
     at = resolve(now)
     pending = [
@@ -154,6 +162,11 @@ def accept_proposal(store: LabelsStore, candidate: str, *, axis: str,
     final_tag_id = tag_id or _auto_tag_id(store, candidate, axis)
     add_tag(store, tag_id=final_tag_id, axis=axis, label=candidate,
             parent=None, now=at)
+    # #92：繁体原形登记为该标签的别名（新标签本就无别名，直接写入即可）。
+    kept = [str(v) for v in (row.payload or {}).get("variants") or []
+            if str(v).strip()]
+    if kept:
+        set_aliases(store, final_tag_id, kept)
     store.update_proposal_status(pending[0].proposal_id, "accepted")
     store.append_event("proposal_accepted", {
         "candidate": candidate, "tag_id": final_tag_id,

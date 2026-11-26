@@ -509,8 +509,12 @@ def _apply_event(conn: sqlite3.Connection, event: Event) -> None:
     elif t == "label_set":
         _apply_label_set(conn, event.book_id, p, at)
     elif t == "label_cleared":
-        conn.execute("DELETE FROM book_tags WHERE book_id = ? AND tag_id = ? AND source = 'auto'",
-                     (event.book_id, p["tag_id"]))  # F2：只清 auto 行；manual/user 双保护
+        # F2：默认只清 auto 行（manual/user 双保护）；#121 允许 payload 带 source
+        # 指定清哪一种来源——GUI 得能撤销自己贴错的 user 行。缺省保持旧语义，
+        # 无 source 的历史事件重放逐位不变。
+        src = str(p.get("source") or "auto")
+        conn.execute("DELETE FROM book_tags WHERE book_id = ? AND tag_id = ? AND source = ?",
+                     (event.book_id, p["tag_id"], src))
     elif t == "label_moved":
         # #104：合并搬迁人工行（merge 是用户动作，不是自动提取——D1 保护的是
         # auto 覆盖，不是人工合并）。行内 source/confidence/basis/updated_at 原样

@@ -24,6 +24,7 @@ from .rank_id import format_rank_book_id
 
 __all__ = [
     "decode_vector_blob",
+    "load_axis_ids",
     "load_book_names",
     "load_books",
     "load_candidate_books",
@@ -133,11 +134,25 @@ def load_eval_samples(store) -> list[tuple[str, str, int]]:
     return [(format_rank_book_id(r[0]), str(r[1]), 1 if r[2] == "liked" else 0) for r in rows]
 
 
+def load_axis_ids(store) -> tuple[str, ...]:
+    """分类法声明轴（tags 里 axis='' 且挂在域下的行）→ 覆盖度分母（#110）。"""
+    conn = store.read_conn()
+    try:
+        rows = conn.execute(
+            "SELECT tag_id FROM tags WHERE axis = '' AND parent IS NOT NULL"
+            " AND status = 'active' ORDER BY tag_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    return tuple(str(row[0]) for row in rows)
+
+
 def load_profile(store):
     """事件流重放 → 画像（W9 rehydrate 同流；只读）。"""
     from reco_core.feedback import rehydrate_from_events
 
-    return rehydrate_from_events(store.read_events())
+    axes = load_axis_ids(store)
+    return rehydrate_from_events(store.read_events(), axes=axes or None)
 
 
 def mute_map_from_store(store) -> dict[str, Any]:

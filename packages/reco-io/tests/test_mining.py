@@ -28,6 +28,18 @@ def test_mine_unsupported_or_missing_file_returns_empty(tmp_path):
     assert mine_alias_counts(tmp_path / "nope.txt") == {}
 
 
+def test_mine_merges_across_tokenizer_split(tmp_path):
+    """#92：先归一再分词——「催眠術」不再被拆成「催眠」+「術」另立候选。"""
+    from reco_io.mining import mine_alias_counts_with_variants
+
+    p = tmp_path / "book.txt"
+    p.write_text("他研究催眠術。他研究催眠术。", encoding="utf-8")
+    counts, variants = mine_alias_counts_with_variants(p)
+    assert counts.get("催眠术") == 2
+    assert "催眠" not in counts
+    assert variants.get("催眠术") == ("催眠術",)
+
+
 def test_mine_limit_caps_entries(tmp_path):
     p = tmp_path / "book.txt"
     p.write_text("催眠调教驯化奴役药物诅咒寄生契约" * 50, encoding="utf-8")

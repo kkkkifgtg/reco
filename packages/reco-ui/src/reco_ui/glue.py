@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from reco_store import Store, dedup_key, normalize_book_name
 from reco_store.reads import count_present_in_zone, zone_page
+from reco_store.recommend import load_axis_ids
 
 GUI_SEED_FP = "gui/seed/1"
 GUI_FEEDBACK_FP = "gui/feedback/1"
@@ -81,7 +82,9 @@ def record_feedback(store: Store, kind: str, book_id, axis=None, value=1.0, now=
     from reco_store.feedback import record_feedback as _store_record
 
     receipt = _store_record(store, kind, int(book_id), axis=axis, value=value,
-                            now=_coerce_now(now), config_fingerprint=GUI_FEEDBACK_FP)
+                            now=_coerce_now(now),
+                            config_fingerprint=GUI_FEEDBACK_FP,
+                            axes=load_axis_ids(store))
     return int(receipt["event_id"])
 
 def zone_meta(store: Store, zone: str, *, limit: int = 200) -> dict:

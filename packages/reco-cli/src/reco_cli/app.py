@@ -172,13 +172,13 @@ def _auto_tag_book_for_zone(store, book_id: int, path: str, zone: str, *, now: s
     正文只进分词器，计数以外的内容零落库（B 类）。
     返回 {tagged, folded, inserted, proposed, alias_proposed}。
     """
-    from reco_io.mining import mine_alias_counts
+    from reco_io.mining import mine_alias_counts_with_variants
     from reco_labels.auto_tag import StoreAdapter, auto_tag_book
 
-    counts = mine_alias_counts(path)
+    counts, variants = mine_alias_counts_with_variants(path)
     outcome = auto_tag_book(
         StoreAdapter(store), book_id, zone,
-        SimpleNamespace(alias_counts=counts), now=now,
+        SimpleNamespace(alias_counts=counts, alias_variants=variants), now=now,
     )
     folded = zone == "liked"
     if folded:
@@ -314,12 +314,14 @@ def cmd_recommend(db, *, as_json=True, persist=False) -> int:
 def cmd_feedback(kind, *, db, book_id, axis=None, value=1.0) -> int:
     """反馈入口：写库与静音编排全在 reco_store.feedback，这里只渲染回执。"""
     from reco_store.feedback import record_feedback as _record_feedback
+    from reco_store.recommend import load_axis_ids
 
     with perf_span("cli.feedback"):
         store = open_store(db)
         try:
             receipt = _record_feedback(store, kind, int(book_id), axis=axis,
-                                       value=value, now=datetime.now(timezone.utc))
+                                       value=value, now=datetime.now(timezone.utc),
+                                       axes=load_axis_ids(store))
             if kind == "add_to_pool":
                 print(json.dumps({"status": "ok", "kind": kind,
                                   "book_id": int(book_id)}, ensure_ascii=False))

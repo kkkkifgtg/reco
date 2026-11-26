@@ -24,15 +24,16 @@ def process_book_for_profile(store, path: str, zone: str, *, now: str) -> dict:
     返回 {"skipped": True}（诚实跳过，不猜）。
     """
     from reco_io.extract import extract_and_record
-    from reco_io.mining import mine_alias_counts
+    from reco_io.mining import mine_alias_counts_with_variants
     from reco_labels.auto_tag import tag_book_and_fold
 
     book_id = book_id_by_path(store, path)
     if book_id is None:
         return {"skipped": True}
     extract_and_record(store, book_id, path, now=now, config_fingerprint="gui/extract/1")
-    counts = mine_alias_counts(path)
+    counts, variants = mine_alias_counts_with_variants(path)
     outcome = tag_book_and_fold(store, book_id, zone, counts, now=now,
+                                alias_variants=variants,
                                 config_fingerprint="gui/autotag/1")
     return {"book_id": book_id,
             "extracted": True,

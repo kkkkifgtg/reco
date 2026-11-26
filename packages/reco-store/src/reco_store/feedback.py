@@ -19,6 +19,7 @@ DEFAULT_FEEDBACK_FP = "store/feedback/1"
 def record_feedback(
     store, kind, book_id, *, axis=None, value=1.0, now=None,
     event_id=None, config=None, config_fingerprint: str = DEFAULT_FEEDBACK_FP,
+    axes=None,
 ) -> dict:
     """写反馈并返回回执：{kind, book_id, event_id, profile_event_id, display, mute_window}。
 
@@ -30,7 +31,7 @@ def record_feedback(
 
     result = _record(kind, book_id=int(book_id), axis=axis, value=value,
                      store=store, now=now, event_id=event_id, config=config,
-                     config_fingerprint=config_fingerprint)
+                     config_fingerprint=config_fingerprint, axes=axes)
     event = dict(result["event"])
     receipt = {
         "kind": str(kind),
