@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from reco_labels.clock import resolve
 from reco_labels.store import LabelsStore, TagRow
 
 
@@ -16,15 +17,16 @@ def add_tag(store: LabelsStore, *, tag_id: str, axis: str, label: str,
             parent: str | None = None, now: str = "") -> TagRow:
     if any(r.tag_id == tag_id for r in store.iter_tags()):
         raise ValueError(f"标签已存在: {tag_id}")
+    at = resolve(now)
     row = TagRow(
         tag_id=tag_id, axis=axis, label=label, aliases=(), parent=parent,
         status="active", merged_into=None, created_by="user",
-        created_at=now or "2026-11-20",
+        created_at=at,
     )
     store.upsert_tag(row)
-    store.append_event("tag_created", {
+    store.record_label_event("tag_created", {
         "tag_id": tag_id, "axis": axis, "created_by": "user",
-    }, occurred_at=now or "2026-11-20")
+    }, occurred_at=at)
     return row
 
 
@@ -50,7 +52,8 @@ class MergeResult:
     redirected_rows: int
 
 
-def merge_tags(store: LabelsStore, source_tag: str, target_tag: str) -> MergeResult:
+def merge_tags(store: LabelsStore, source_tag: str, target_tag: str, *,
+               now: str = "") -> MergeResult:
     rows = {r.tag_id: r for r in store.iter_tags()}
     src = rows.get(source_tag)
     tgt = rows.get(target_tag)
@@ -71,15 +74,15 @@ def merge_tags(store: LabelsStore, source_tag: str, target_tag: str) -> MergeRes
         created_by=src.created_by, created_at=src.created_at,
     )
     store.upsert_tag(merged_row)
-    store.append_event("tag_merged", {
+    store.record_label_event("tag_merged", {
         "source": source_tag, "target": target_tag,
         "redirected_rows": redirected,
-    }, occurred_at="2026-11-21")
+    }, occurred_at=resolve(now))
     return MergeResult(source=source_tag, target=target_tag,
                        redirected_rows=redirected)
 
 
-def archive_tag(store: LabelsStore, tag_id: str, now: str = "2026-11-21") -> TagRow:
+def archive_tag(store: LabelsStore, tag_id: str, now: str = "") -> TagRow:
     rows = {r.tag_id: r for r in store.iter_tags()}
     row = rows.get(tag_id)
     if row is None:
@@ -90,5 +93,5 @@ def archive_tag(store: LabelsStore, tag_id: str, now: str = "2026-11-21") -> Tag
         created_by=row.created_by, created_at=row.created_at,
     )
     store.upsert_tag(archived)
-    store.append_event("tag_archived", {"tag_id": tag_id}, occurred_at=now)
+    store.record_label_event("tag_archived", {"tag_id": tag_id}, occurred_at=resolve(now))
     return archived

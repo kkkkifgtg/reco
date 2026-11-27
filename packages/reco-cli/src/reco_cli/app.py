@@ -25,6 +25,8 @@ from typing import Any
 from reco_io.perf import perf_span
 from reco_io.scanner import scan_zones
 from reco_store import open_store
+from reco_store.rank_id import format_rank_book_id
+from reco_store.reads import present_book_zones, present_files
 
 __all__ = [
     "cmd_eval",
@@ -33,6 +35,7 @@ __all__ = [
     "cmd_feedback",
     "cmd_recommend",
     "cmd_replay",
+    "cmd_unmute",
     "cmd_report",
     "cmd_scan",
     "mute_map_from_store",
@@ -136,18 +139,9 @@ _EXTRACT_OK_FLAGS = frozenset({"ok", "empty", "oversized_streamed"})
 
 def _present_files_by_book(store) -> dict[int, list[tuple[str, int]]]:
     """present=1 文件行按 book_id 分组（同书可多条；book_id 序 → 确定性处理次序）。"""
-    conn = store.read_conn()
-    try:
-        rows = conn.execute(
-            "SELECT book_id, path, size_bytes FROM files"
-            " WHERE present = 1 AND book_id IS NOT NULL"
-            " ORDER BY book_id, path"
-        ).fetchall()
-    finally:
-        conn.close()
     groups: dict[int, list[tuple[str, int]]] = {}
-    for book_id, path, size_bytes in rows:
-        groups.setdefault(int(book_id), []).append((str(path), int(size_bytes)))
+    for book_id, path, size_bytes in present_files(store):
+        groups.setdefault(book_id, []).append((path, size_bytes))
     return groups
 
 
@@ -165,16 +159,9 @@ def _pick_extract_file(files: list[tuple[str, int]]) -> str | None:
 
 def _book_zones(store) -> dict[int, set[str]]:
     """book_id → 出现过的专区集合（files 投影；双区同书两侧都算）。"""
-    conn = store.read_conn()
-    try:
-        rows = conn.execute(
-            "SELECT book_id, zone FROM files WHERE present = 1 AND book_id IS NOT NULL"
-        ).fetchall()
-    finally:
-        conn.close()
     zones: dict[int, set[str]] = {}
-    for book_id, zone in rows:
-        zones.setdefault(int(book_id), set()).add(str(zone or ""))
+    for book_id, zone in present_book_zones(store):
+        zones.setdefault(book_id, set()).add(zone)
     return zones
 
 
@@ -222,7 +209,9 @@ def cmd_extract(db, *, limit=None) -> int:
       未知高频词/谐音形近变体进 proposals 待确认）；
     - 无可用文件/降级（undecodable/corrupt_container/pending_timeout/
       unreadable）如实计 failed，整轮不中断；
-    - stdout 只输出 JSON 摘要 {total, ok, failed, vectors, tagged, proposals}（无正文）。
+    - #109 重算门：文件与提取器都没变的书直接跳过（skipped），第二轮提取不再追加
+      事件、也不再重复打标；
+    - stdout 只输出 JSON 摘要 {total, ok, skipped, failed, vectors, tagged, proposals}（无正文）。
     """
     from reco_io.extract import extract_and_record
 
@@ -232,7 +221,7 @@ def cmd_extract(db, *, limit=None) -> int:
             groups = _present_files_by_book(store)
             zones = _book_zones(store)
             now = _utc_now_iso()
-            total = ok = failed = vectors = tagged = proposals = 0
+            total = ok = skipped = failed = vectors = tagged = proposals = 0
             for book_id, files in groups.items():
                 if limit is not None and total >= limit:
                     break
@@ -245,6 +234,9 @@ def cmd_extract(db, *, limit=None) -> int:
                     store, book_id, path, now=now,
                     config_fingerprint=EXTRACT_CONFIG_FP,
                 )
+                if result.skipped:
+                    skipped += 1
+                    continue
                 if result.vector_written:
                     vectors += 1
                 if result.quality_flag in _EXTRACT_OK_FLAGS:
@@ -263,9 +255,10 @@ def cmd_extract(db, *, limit=None) -> int:
                     except Exception as exc:
                         print(f"warn: 自动打标失败 book={book_id} "
                               f"({type(exc).__name__}: {exc})", file=sys.stderr)
-            print(json.dumps({"total": total, "ok": ok, "failed": failed,
-                              "vectors": vectors, "tagged": tagged,
-                              "proposals": proposals}, ensure_ascii=False))
+            print(json.dumps({"total": total, "ok": ok, "skipped": skipped,
+                              "failed": failed, "vectors": vectors,
+                              "tagged": tagged, "proposals": proposals},
+                             ensure_ascii=False))
             return 0
         finally:
             store.close()
@@ -326,109 +319,89 @@ def cmd_recommend(db, *, as_json=True, persist=False) -> int:
 # ---------------------------------------------------------------- feedback
 
 def cmd_feedback(kind, *, db, book_id, axis=None, value=1.0) -> int:
-    """反馈入口：add_to_pool → pool_added；dislike/like → rec_feedback + 静音落库。"""
-    # 共用核心写入口（reco_core.feedback.record_feedback）：回执含 profile_event_id，
-    # 说明本次是否落了画像版本快照（#71）。feedback_effects 仍供静音窗口计算。
-    from reco_core.feedback import feedback_effects, record_feedback as _record_feedback
+    """反馈入口：写库与静音编排全在 reco_store.feedback，这里只渲染回执。"""
+    from reco_store.feedback import record_feedback as _record_feedback
     from reco_store.recommend import load_axis_ids
 
     with perf_span("cli.feedback"):
         store = open_store(db)
         try:
-            now = datetime.now(timezone.utc)
-            result = _record_feedback(kind, book_id=int(book_id), axis=axis,
-                                      value=value, store=store, now=now,
-                                      axes=load_axis_ids(store))
+            receipt = _record_feedback(store, kind, int(book_id), axis=axis,
+                                       value=value, now=datetime.now(timezone.utc),
+                                       axes=load_axis_ids(store))
             if kind == "add_to_pool":
                 print(json.dumps({"status": "ok", "kind": kind,
                                   "book_id": int(book_id)}, ensure_ascii=False))
                 return 0
-            profile = _load_profile(store)
-            effects = feedback_effects(
-                {"event_type": "rec_feedback", "event_id": result["event"]["event_id"],
-                 "occurred_at": now.isoformat(),
-                 "payload": {"axis": axis, "kind": kind, "value": float(value)},
-                 "book_id": int(book_id)},
-                now=now)
-            if kind == "dislike":
-                window = effects.get("mute_window")
-                if window is not None:
-                    store.record_mute(
-                        int(book_id),
-                        dedup_key=_dedup_key_of(store, int(book_id)),
-                        axis=str(axis), kind="dislike",
-                        expired_at=str(window.expired_at),
-                        remaining_days=float(window.remaining_days),
-                        occurred_at=now.isoformat(),
-                        config_fingerprint="cli/feedback/1",
-                    )
-            print(effects["display"])  # C7 文案透传（已调整：X 维度权重已下调/上调）
+            print(receipt["display"])  # C7 文案透传（已调整：X 维度权重已下调/上调）
             return 0
         finally:
             store.close()
 
 
-def _dedup_key_of(store, book_id: int) -> str | None:
-    conn = store.read_conn()
-    try:
-        row = conn.execute("SELECT dedup_key FROM books WHERE book_id = ?", (book_id,)).fetchone()
-    finally:
-        conn.close()
-    return row[0] if row else None
+def cmd_unmute(db, *, book_id) -> int:
+    """人工解除静音（#111：release_mute 的第一个生产调用方）。
+
+    静音到期由读侧过滤（feedback 层），这里给「用户改主意」一条显式出口：
+    写 mute_released 事件，投影零残留，之后 recommend/explain 立刻不再标 muted。
+    """
+    from reco_store.feedback import release_feedback
+    from reco_store.rank_id import format_rank_book_id, parse_rank_book_id
+
+    with perf_span("cli.unmute"):
+        bid = parse_rank_book_id(book_id)
+        if bid is None:
+            print(json.dumps({"error": f"book_id={book_id} 不是合法书号",
+                              "status": "rejected"}, ensure_ascii=False))
+            return 1
+        store = open_store(db)
+        try:
+            receipt = release_feedback(store, bid)
+            print(json.dumps({"status": "ok",
+                              "book_id": format_rank_book_id(bid),
+                              "event_id": receipt["event_id"]}, ensure_ascii=False))
+            return 0
+        finally:
+            store.close()
 
 
 # ---------------------------------------------------------------- explain
 
 def cmd_explain(db, *, book_id) -> int:
-    """单书解释：W8 explain 输出透传（book_id 维度；无正文）。"""
-    from reco_core.score import explain
+    """单书解释：装配与打分全在 store/core（与 recommend 同一次装配，#98）。
+
+    修复前这里传空向量给 score.explain，_synthesize 跳过空向量 → 恒 no_features。
+    CLI 只做书号解析与 JSON 序列化，不再自己拼向量。
+    """
+    from reco_store.rank_id import format_rank_book_id, parse_rank_book_id
+    from reco_store.recommend import explain_book
 
     with perf_span("cli.explain"):
+        try:
+            bid = parse_rank_book_id(book_id)
+        except ValueError:
+            print(json.dumps({"error": f"book_id={book_id} 不是合法书号",
+                              "reasons": []}, ensure_ascii=False))
+            return 1
         store = open_store(db)
         try:
-            profile_data = _load_profile(store)
-            # ProfileData → score.Profile 桥接（explain 只读 score 契约面）
-            from reco_core.score import Profile as ScoreProfile
-
-            counts = dict(profile_data.sample_counts)
-            profile = ScoreProfile(
-                weights=tuple(profile_data.weights),
-                sample_counts={"n_pos": int(counts.get("tag_like", 0)),
-                               "n_neg": int(counts.get("tag_dislike", 0))},
-                behavior_signals=dict(profile_data.behavior_signals),
-            )
-            conn = store.read_conn()
-            try:
-                row = conn.execute(
-                    "SELECT book_id, dedup_key FROM books WHERE book_id = ?", (int(book_id),)
-                ).fetchone()
-            finally:
-                conn.close()
-            if row is None:
+            result = explain_book(store, bid)
+            if result["status"] == "unknown_book":
                 print(json.dumps({"error": f"book_id={book_id} 不在特征库",
                                   "reasons": []}, ensure_ascii=False))
                 return 1
-            bid, key = row
-            try:
-                reasons = explain([(f"b{bid}", {})],  # score 向量契约：纯 {dim:weight}
-                                  profile, f"b{bid}")
-                status = "ok"
-            except ValueError:
-                # §6.3：特征缺失跳过不静默当 0 分——如实报「无可解释依据」不崩
-                reasons = []
-                status = "no_features"
             payload = {
-                "book_id": f"b{bid}",
-                "status": status,
+                "book_id": format_rank_book_id(bid),
+                "status": result["status"],
                 "reasons": [{"axis": r.axis, "contribution": float(r.contribution),
-                             "source": r.source} for r in reasons],
-                "profile": _confidence_dict(profile_data.confidence),
+                             "source": r.source} for r in result["reasons"]],
+                "muted": bool(result["muted"]),
+                "profile": _confidence_dict(_load_profile(store).confidence),
             }
             print(json.dumps(payload, ensure_ascii=False))
             return 0
         finally:
             store.close()
-
 
 # ---------------------------------------------------------------- replay
 
@@ -453,7 +426,7 @@ def cmd_eval(db) -> int:
     """评估入口：真实样本接线 + 持久化门（W13/W8 接缝②；§6.3 ≥10 才评估）。"""
     from datetime import datetime, timezone as _tz
 
-    from reco_core.profile import persist_evaluation_gate
+    from reco_core.profile import persist_evaluation_gate, sample_counts_for_scoring
     from reco_core.score import evaluate_pairwise
     from reco_store.recommend import load_eval_samples, load_profile
 
@@ -461,16 +434,15 @@ def cmd_eval(db) -> int:
         store = open_store(db)
         try:
             profile = load_profile(store)
-            counts = profile.sample_counts
-            n_pos = int(counts.get("tag_like", 0))
-            n_neg = int(counts.get("tag_dislike", 0))
+            gate = sample_counts_for_scoring(profile.sample_counts)  # 与画像同源（#103）
+            n_pos, n_neg = gate["n_pos"], gate["n_neg"]
             if n_pos < 10 or n_neg < 10:
                 print(json.dumps(
                     {"status": "insufficient", "n_pos": n_pos, "n_neg": n_neg,
                      "display": f"样本 {n_pos}/{n_neg}（正/负），不足以判定，不评估"},
                     ensure_ascii=False))
                 return 0
-            samples = load_eval_samples(store)  # W11 遗留闭合：真实样本（非 []）
+            samples = load_eval_samples(store)  # 一册一行、样本=特征向量（#103）
             result = evaluate_pairwise(samples, None)
             now = datetime.now(_tz.utc)
             eval_event_id = persist_evaluation_gate(

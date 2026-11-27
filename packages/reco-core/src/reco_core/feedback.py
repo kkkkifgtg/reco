@@ -31,7 +31,9 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Mapping
 
-from reco_core.profile import build_profile, persist_profile_snapshot, update_profile
+from reco_core.profile import (
+    build_profile, persist_profile_snapshot, sample_counts_for_scoring, update_profile,
+)
 from reco_core.score import Profile as ScoreProfile
 from reco_core.score import Reason as ScoreReason
 from reco_core.score import rank as score_rank
@@ -200,7 +202,13 @@ def persist_feedback(kind, book_id, axis=None, value=1.0, store=None, now=None, 
     event["book_id"] = book_id
     appended = False
     if store is not None:
-        store.append(event)
+        assigned = store.append(event)
+        # 存储层会重新分配 event_id；把落库后的 id 记回事件，快照锚点据此对齐，
+        # 不再回头读「库尾事件」推断（#108：并发写会让库尾变成别人的事件）。
+        if isinstance(assigned, Mapping):
+            assigned = assigned.get("event_id")
+        if isinstance(assigned, int) and not isinstance(assigned, bool):
+            event["event_id"] = int(assigned)
         appended = True
     return {"event": event, "appended": appended, "kind": kind, "book_id": book_id}
 
@@ -221,12 +229,22 @@ def _event_id_of(event):
     return int(value) if value is not None else None
 
 
-def _without_just_appended(events, event):
-    """剔除「刚由 persist_feedback 落库的那条事件」，得到折叠基线。
+def _without_event(events, event):
+    """从事件流里剔除「刚由 persist_feedback 落库的那条事件」，得到折叠基线。
 
-    store 会重新分配 event_id（persist_feedback 的 event_id 是时间戳派生占位，
-    见其 docstring），两者不可直接比对，故按 (类型, 发生时间, book_id) 认最后一条。
+    优先按 event_id 精确剔除（id 由 store 返回，见 persist_feedback）；
+    只有在鸭子 store 不返回 id 时才退回「末条同形」启发式（#108 之前的行为）。
     """
+    wanted = _event_id_of(event)
+    if wanted is not None:
+        for index in range(len(events) - 1, -1, -1):
+            if _event_id_of(events[index]) == wanted:
+                return list(events[:index]) + list(events[index + 1:])
+    return _without_tail_lookalike(events, event)
+
+
+def _without_tail_lookalike(events, event):
+    """兜底：按 (类型, 发生时间, book_id) 认最后一条并剔除。"""
     if not events:
         return events
     last = events[-1]
@@ -252,8 +270,9 @@ def checkpoint_profile(store, event, *, config=None, now=None, config_fingerprin
     """
     events = list(store.read_events())
     prior = sum(1 for ev in events if _event_type_of(ev) == "profile_updated")
-    base = replace(rehydrate_from_events(_without_just_appended(events, event),
-                                         config=config, now=now, axes=axes), version=prior)
+    base = replace(rehydrate_from_events(_without_event(events, event),
+                                         config=config, now=now, axes=axes),
+                   version=prior)
     profile = update_profile(base, event, config=config, now=now, axes=axes)
     return profile, persist_profile_snapshot(store, profile,
                                              config_fingerprint=config_fingerprint)
@@ -272,11 +291,10 @@ def record_feedback(kind, book_id, axis=None, value=1.0, store=None, now=None,
     result["profile"] = None
     result["profile_event_id"] = None
     if store is not None and kind in ("like", "dislike"):
-        # store 会重新分配 event_id（persist_feedback 里的 event_id 只是时间戳派生占位），
-        # 所以折叠落库后的那条事件：快照 high_water 才与重放口径一致。
-        events = list(store.read_events())
+        # 折叠「刚落库的那条事件」：persist_feedback 已把 store 分配的 event_id
+        # 写回 event，快照锚点不再依赖库尾读取（#108）。
         result["profile"], result["profile_event_id"] = checkpoint_profile(
-            store, events[-1] if events else result["event"], config=config,
+            store, result["event"], config=config,
             now=_coerce_now(now), config_fingerprint=config_fingerprint, axes=axes)
     return result
 
@@ -357,20 +375,19 @@ def _score_feedback_aware(candidate_features, profile, config=None, mute_by_key=
     signals = dict(getattr(profile, "behavior_signals", None) or {})
     weights = (w_sim, w_model, w_behavior)
     if muted_ids:
-        w_behavior_view = w_behavior + 0.05 * w_sim
-        w_sim_view = w_sim - 0.05 * w_sim
-        w_sim_view = w_sim - 0.05 * w_sim
+        # 95/5 分配：把写死的 0.05 换成 _MUTE_KEEP，份额与常量同源
+        # （#101：同一算术不再手抄两遍，也不再改比例漏改一处）。
+        w_behavior_view = w_behavior + _MUTE_KEEP * w_sim
+        w_sim_view = w_sim - _MUTE_KEEP * w_sim
         weights = (w_sim_view, w_model, w_behavior_view)
         if w_behavior_view > 0 and w_sim > 0:
             sims = dict(score_similarity(candidates, tuple(positive_vectors or ())))
             for bid in muted_ids:
                 sim = sims.get(bid, 0.0)
                 signals[bid] = -(_MUTE_DAMP - _MUTE_KEEP) * w_sim * sim / w_behavior_view
-    counts = getattr(profile, "sample_counts", None) or {}
     sp = ScoreProfile(
         weights=weights,
-        sample_counts={"n_pos": int(counts.get("tag_like", 0) or 0),
-                       "n_neg": int(counts.get("tag_dislike", 0) or 0)},
+        sample_counts=sample_counts_for_scoring(getattr(profile, "sample_counts", None)),
         behavior_signals=signals,
         positive_vectors=tuple(positive_vectors or ()),
     )

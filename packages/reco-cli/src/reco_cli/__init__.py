@@ -10,7 +10,8 @@ __all__ = ["main"]
 
 __version__ = "0.1.0"
 
-_SUBCOMMANDS = ("report", "scan", "extract", "recommend", "feedback", "explain", "replay", "eval")
+_SUBCOMMANDS = ("report", "scan", "extract", "recommend", "feedback", "unmute",
+                  "explain", "replay", "eval")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -40,8 +41,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("kind", choices=["dislike", "like", "add_to_pool"])
     p.add_argument("--db", required=True)
     p.add_argument("--book-id", required=True)
-    p.add_argument("--axis", default=None)
+    p.add_argument("--axis", default=None,
+                   help="覆盖自动推导的轴（默认按书的标签取主导轴）")
     p.add_argument("--value", type=float, default=1.0)
+
+    p = sub.add_parser("unmute", help="人工解除静音（提前放出该书）")
+    p.add_argument("--db", required=True)
+    p.add_argument("--book-id", required=True)
 
     p = sub.add_parser("explain", help="单书推荐解释")
     p.add_argument("--db", required=True)
@@ -90,6 +96,8 @@ def main(argv: list[str] | None = None) -> int:
     if ns.command == "feedback":
         return app.cmd_feedback(ns.kind, db=ns.db, book_id=ns.book_id,
                                 axis=ns.axis, value=ns.value)
+    if ns.command == "unmute":
+        return app.cmd_unmute(ns.db, book_id=ns.book_id)
     if ns.command == "explain":
         return app.cmd_explain(ns.db, book_id=ns.book_id)
     if ns.command == "replay":

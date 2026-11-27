@@ -14,14 +14,19 @@
 
 ## 当前实现口径（2026-11-25）
 
-1. **生产向量**：`reco_io.extract` 使用字符 2–3gram 哈希桶计数、Top-64、L2 归一；没有调用 IDF。`feature_vectors.idf_version` 保留旧列名，当前写 `reco-ngram-counts/1`。`reco_core.vectorize` 的语料级 TF-IDF 是独立可用实现，不是当前生产入口。
-2. **正样本口径**：领域契约要求 liked 为已确认正样本；当前 `reco_store.recommend.rank_candidates` 仍把全部已存向量作为相似度质心输入，candidate 与推荐专区只被排除在候选域之外。这是尚未收敛的实现差异，本次统稿不改变推荐算法。
+1. **生产向量**：`reco_io.extract` 使用字符 2–3gram 哈希桶计数、Top-64、L2 归一；没有调用 IDF。`feature_vectors.idf_version` 保留旧列名，当前写 `reco-ngram-counts/1`。`reco_core.vectorize` 的语料级 TF-IDF 已删除（#111 清点：生产零调用方，且与「不计算 IDF」这条口径相矛盾）。
+2. **正样本口径**：相似度质心 = liked 专区中已产出特征向量的作品（按 book_id 去重），与 CONTEXT.md「正样本 = liked/ 中的作品」一致；candidate 与推荐专区不进质心，因此候选区扩容不会静默改动已有书的分数（#102 已收敛）。`rank_candidates` 额外返回 `n_positive`（质心成员数）与 `n_vectors`（库级有向量书数，空态文案依据）。
 3. **阅读器**：GUI 已内建 txt/md、EPUB、DOCX、PDF 阅读页；位置写入独立 `reading_progress` 表，行为信号写 `signal_recorded` 事件。§17 Q12 的「不内建」是历史裁定，已被后续实现取代。
 4. **阅读信号**：`dwell`、`completion`、`reopen` 参与画像行为折叠；`read_time` 当前只采集，不产生画像效应。
 5. **依赖**：以 `uv.lock` 与 `docs/DEPENDENCIES.md` 为准。jieba/pkuseg 是标签挖掘的可选分词器，不再适用早期「不引入 jieba」的依赖结论。
-6. **测试**：当前全仓基线为 `737 passed / 2 failed / 4 skipped`（2026-11-25，离屏模式）；两处失败均位于 `tests/test_extract_closed_loop.py`，为本次统稿之前既有的缺陷（与文档变更无关，另行跟踪）；历史验收与复盘中的 379/384 均是其当时快照。
+6. **文本口径**：解码（BOM → utf-8 → gb18030 严格）、HTML 剥离（线性、无回溯）与 EPUB spine 顺序只有一份实现，在 `reco_io.textkit`；阅读器、特征提取与标签挖掘都从这里取。长书的重复短语比与 n-gram 桶只吃前 100 万非空白字符（`DEFAULT_REPEAT_WINDOW_CHARS`，确定性前缀），`char_count` 等统计量吃全文。
+7. **测试**：当前全仓基线为 `853 passed / 4 skipped`（2026-11-26，离屏模式；跳过项为 torch 未安装、Windows 符号链接权限、两个 POSIX 权限用例）；历史验收与复盘中的 379/384 等数字均是其当时快照。
+8. **重放比对面与静音出口**：#111 起 `proposals` 进 `COMPARE_TABLES`（重放漂移不再只在审核列表上不可见）；静音解除有了生产路径——`reco_store.feedback.release_feedback` 写 `mute_released`，CLI `unmute` 是它的第一个调用方，用户不必等静音到期。
+9. **池线程 worker 与默认路径**：#113 起所有 QRunnable 走 `reco_ui.workers.PoolWorker`（入队即持活、发射后释放、每子类独立注册表、销毁后发射静默丢弃），不再各抄一份注册表；数据根默认值从 `RECO_DATA_ROOT` 派生，未设时为 `~/reco-data`，不再写死某台机器的 `F:` 路径。
+10. **反馈轴的唯一来源**：`reco_store.feedback.record_feedback` 在调用方没给 `axis` 时按书的标签推导主导轴（`reco_store.reads.dominant_axis_for_book`：标签行数降序、同数按最高置信度），无标签记 `unknown`——UI 不再写死分类法里不存在的 `"tag"`，CLI 的 `--axis` 退化为显式覆盖，三个来源收成一个（#101 残余）。
+11. **事件协议两层**：`reco_labels` 的 `LabelsStore.record_label_event(kind, payload, *, occurred_at, book_id)` 只收标签词表（`EVENT_KINDS`），由 `StoreAdapter` 分派映射到 store 事件，不返回 id；`reco_store.Store.append_event(event_type, payload, *, book_id, occurred_at, config_fingerprint, actor)` 才是写事件词表、返回自增 id 的那层。两个名字不同是刻意的——同名会让人以为是一次直通转发（#108 的残余半边）。
 
-下文保留决策形成时的调研与论证；涉及上述六项的旧结论不覆盖本清单。
+下文保留决策形成时的调研与论证；涉及上述各项的旧结论不覆盖本清单。
 
 ---
 
@@ -462,13 +467,13 @@
 score = w_sim × 相似度 + w_model × 分类器输出 + w_behavior × 行为信号
 
 **接口签名**
-- similarity_scores(candidate_vectors, positive_vectors, config) -> list[tuple[book_id, sim]]
+- similarity_scores(candidate_vectors, positive_vectors, config) -> list[tuple[book_id, sim]]（positive_vectors 取 liked 正样本的向量，见上文「当前实现口径」第 2 条）
 - weight_schedule(n_pos, n_neg, cv_auc, config) -> WeightSet（平滑连续，相邻样本量差有上限）
 - score(candidate_features, profile, config, now) -> list[tuple[book_id, score]]（**唯一**打分入口，纯函数）
 - rank(candidate_features, profile, config, now) -> list[RankRow]（RankRow = {book_id, score, rank, reasons, is_exploration}；CLI/GUI 唯一排序来源）
 - explain(candidate_features, profile, book_id) -> list[Reason]（命中轴/相似样本 id/权重贡献）
-- train_pairwise(labeled_features, config) -> ModelHandle | None（仅 n_pos≥10 且 n_neg≥10 时返回句柄，否则 None）
-- evaluate_pairwise(samples, config) -> EvalResult（auc, ci_low, ci_high, folds, n_pos, n_neg）
+- train_pairwise(labeled_features, config) -> ModelHandle | None（仅 n_pos≥10 且 n_neg≥10 时返回句柄，否则 None；样本 = (book_id, 特征向量, label)，与打分同源）
+- evaluate_pairwise(samples, config) -> EvalResult（auc, ci_low, ci_high, folds, n_pos, n_neg；样本同上，一册一行）
 - similarity_provider（可注入：默认 TF-IDF；句向量只能作为外部插件）
 
 **硬性行为**
@@ -650,7 +655,7 @@ score = w_sim × 相似度 + w_model × 分类器输出 + w_behavior × 行为�
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | event_id | INTEGER PK AUTOINCREMENT | 顺序即因果顺序 |
-| event_type | TEXT | scan_started/completed、file_added/moved/removed/fingerprint_changed、tag_added/merged/archived、tag_hit、relation_updated/manual_set、label_set/label_cleared、signal_recorded、profile_updated、rec_generated、rec_feedback、eval_run、perf_sample |
+| event_type | TEXT | scan_started/completed、file_added/moved/removed/fingerprint_changed、tag_added/merged/archived、tag_hit、relation_updated/manual_set、label_set/label_cleared/label_moved、signal_recorded、profile_updated、rec_generated、rec_feedback、eval_run、perf_sample |
 | book_id | INTEGER NULL | 无书的系统事件为空 |
 | payload_json | TEXT | 事件私有字段（数值/标签/路径/原因；**不含 effective_weight**——由 occurred_at + config_fingerprint 折叠时重算，建议项 2 裁定） |
 | occurred_at | TEXT | 业务时间（回放基准） |
@@ -725,7 +730,7 @@ score = w_sim × 相似度 + w_model × 分类器输出 + w_behavior × 行为�
    - 身份命中且 (size,mtime_ns) 变 → **内容变化**（重算特征，保留标注）；
    - 仅当前有 → **新增**；
    - 仅上次有 → **删除**（present=0，软删）。
-4. append_event：每类变化写一条事件（file_added/moved/removed/fingerprint_changed），事务内批量写、短事务。
+4. append_event：每类变化写一条事件（file_added/moved/removed/fingerprint_changed），事务内批量写、短事务。GUI 再扫描（`reco_ui.sync`）与 CLI 扫描共用同一个 `classify_delta`，不存在第二套手写差分；移动同时改了内容的，`file_moved` 搬路径、随后的 `file_added` 刷新尺寸与 mtime。
 5. 特征提取：对「新增/变化」的书在**事务外**计算统计量与标签命中，再一次性 upsert；失败（损坏/超大超时）标 quarantined 并记事件，不阻塞整轮。
 6. 画像更新：update_profile 折叠新事件（含 signal_recorded），写 profile_versions。
 7. 推荐生成：rank(...) → 写 rec_runs/recommendations；GUI/CLI 均读同一 run_id。

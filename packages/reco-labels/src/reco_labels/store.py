@@ -11,11 +11,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Iterable, Mapping, Protocol, Sequence, runtime_checkable
 
-EVENT_KINDS = frozenset({
-    "tag_merged", "tag_archived", "tag_created", "tag_conflict",
-    "tag_proposed", "proposal_accepted", "proposal_rejected",
-    "relation_updated",  # #69：关系图事件（book_id 为主键）
-})
+# #104：词表与校验只此一份（vocab.py），内存实现与 SQLite 适配器共用。
+from reco_labels.vocab import (  # noqa: E402  (常量，导入位置不影响语义)
+    EVENT_KINDS,
+    validate_proposal_status,
+)
+
 
 
 class ManualTagProtected(Exception):
@@ -88,7 +89,14 @@ class ProposalRow:
 
 @runtime_checkable
 class LabelsStore(Protocol):
-    """窄协议：reco_labels 运行所需的全部存储能力。"""
+    """窄协议：reco_labels 运行所需的全部存储能力。
+
+    #108：`record_label_event` 与 `reco_store.Store.append_event` 是**两层**，
+    所以名字必须不同——store 层写事件词表、返回自增 id、要求
+    config_fingerprint/actor；本层只收 labels 词表（`EVENT_KINDS`），由适配器
+    分派映射，不返回 id，也不保证一一对应（tag_created/tag_proposed 已由写
+    方法落库，这里折叠为 no-op）。同名会让人以为是一次直通转发。
+    """
 
     def iter_tags(self) -> Iterable[TagRow]: ...
     def iter_aliases(self) -> Iterable[tuple[str, str, str]]: ...  # (alias, tag_id, source)
@@ -99,8 +107,8 @@ class LabelsStore(Protocol):
     def record_book_tag(self, book_id: int, tag_id: str, *, source: str,
                         confidence: float, basis_json: str, updated_at: str) -> None: ...
     def redirect_book_tag_rows(self, source_tag: str, target_tag: str) -> int: ...
-    def append_event(self, kind: str, payload: Mapping[str, object],
-                     occurred_at: str, *, book_id: int | None = None) -> None: ...
+    def record_label_event(self, kind: str, payload: Mapping[str, object], *,
+                           occurred_at: str, book_id: int | None = None) -> None: ...
     def insert_proposal(self, kind: str, candidate: str,
                         payload: Mapping[str, object], created_at: str) -> str: ...
     def update_proposal_status(self, proposal_id: str, status: str) -> None: ...
@@ -162,15 +170,21 @@ class InMemoryLabelsStore:
         )
 
     def redirect_book_tag_rows(self, source_tag: str, target_tag: str) -> int:
+        """合并搬迁：历史逐行改指向，source/confidence/basis 原样保留（工单 06 验收 1）。
+
+        #104：manual/user 行一起搬（D1 保护的是 auto 覆盖人工，合并是用户动作）；
+        SQLite 适配器经 label_moved 事件实现同一语义。
+        """
         moved = 0
         for key, row in list(self._s.book_tags.items()):
-            if row.tag_id == source_tag:
-                self._s.book_tags[key] = replace(row, tag_id=target_tag)
-                moved += 1
+            if row.tag_id != source_tag:
+                continue
+            self._s.book_tags[key] = replace(row, tag_id=target_tag)
+            moved += 1
         return moved
 
-    def append_event(self, kind: str, payload: Mapping[str, object],
-                     occurred_at: str, *, book_id: int | None = None) -> None:
+    def record_label_event(self, kind: str, payload: Mapping[str, object], *,
+                           occurred_at: str, book_id: int | None = None) -> None:
         if kind not in EVENT_KINDS:
             raise ValueError(f"未知事件类型: {kind}")
         self._s.event_seq += 1
@@ -189,6 +203,7 @@ class InMemoryLabelsStore:
         return proposal_id
 
     def update_proposal_status(self, proposal_id: str, status: str) -> None:
+        validate_proposal_status(status)  # #104：与适配器同一守卫
         if proposal_id not in self._s.proposals:
             raise KeyError(proposal_id)
         row = self._s.proposals[proposal_id]

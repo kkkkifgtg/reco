@@ -10,8 +10,11 @@
   cli/ui 平级共同 import 本层，互不依赖。
 - 本模块只读（read_conn + load_mutes），零写库；无正文接触（B2/B5）。
 - 候选域（T4/T6）：推荐候选 = candidate 专区 present 文件的书（按 book_id 去重）；
-  liked 只作正样本（positive_vectors 口径不变）；只要该书拥有任一 present liked
-  文件（同书双区也算），即从候选排除；推荐专区（输出落位）不进候选。
+  只要该书拥有任一 present liked 文件（同书双区也算），即从候选排除；推荐专区
+  （输出落位）不进候选。
+- 正样本口径（#102）：相似度质心 = liked 专区有向量的书（按 book_id 去重）。
+  此前用「全库有向量书」，候选区扩容会静默改变每本书的分数；现在与 CONTEXT.md
+  的正样本定义一致，候选扩容不动质心。
 """
 from __future__ import annotations
 
@@ -20,12 +23,16 @@ import struct
 from datetime import datetime, timezone
 from typing import Any
 
+from .rank_id import format_rank_book_id
+
 __all__ = [
     "decode_vector_blob",
+    "explain_book",
     "load_axis_ids",
     "load_book_names",
     "load_books",
     "load_candidate_books",
+    "load_positive_books",
     "load_eval_samples",
     "load_profile",
     "load_vectors",
@@ -108,6 +115,26 @@ def load_candidate_books(store) -> list[tuple[int, str | None]]:
     return [(int(r[0]), None if r[1] is None else str(r[1])) for r in rows]
 
 
+def load_positive_books(store) -> list[tuple[int, str | None]]:
+    """正样本身份：liked 专区 present 文件的书（按 book_id 去重、升序）。
+
+    与 load_candidate_books 对称：这里是相似度质心的成员集（#102）。CONTEXT.md
+    的正样本定义就是「liked/ 中的作品」，候选区扩容因此不会挪动质心；同一本书
+    有多个 liked 文件（硬链接/重复路径）也只计一次。
+    """
+    conn = store.read_conn()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT b.book_id, b.dedup_key FROM books b"
+            " JOIN files f ON f.book_id = b.book_id"
+            " WHERE f.zone = 'liked' AND f.present = 1"
+            " ORDER BY b.book_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [(int(r[0]), None if r[1] is None else str(r[1])) for r in rows]
+
+
 def load_book_names(store) -> dict[str, str]:
     """book_id → 显示名（书名允许显示，F3；无正文）。"""
     conn = store.read_conn()
@@ -115,21 +142,33 @@ def load_book_names(store) -> dict[str, str]:
         rows = conn.execute("SELECT book_id, display_name FROM books ORDER BY book_id").fetchall()
     finally:
         conn.close()
-    return {f"b{int(r[0])}": str(r[1]) for r in rows}
+    return {format_rank_book_id(r[0]): str(r[1]) for r in rows}
 
 
-def load_eval_samples(store) -> list[tuple[str, str, int]]:
-    """eval 样本装配：zone → label（liked=1 其余 0），文本 = display_name（W8 契约 (id,text,label)）。"""
+def load_eval_samples(store) -> list[tuple[str, dict[int, float], int]]:
+    """eval 样本装配：(book_id, 特征向量, label)，一册一行、与打分同源（#103）。
+
+    - 一册一行：按 book_id 聚合，同书多路径（硬链接/跨区副本）只计一次；
+    - 特征与 §6.3 同源：用 feature_vectors 的向量，而不是书名文本；
+    - label：liked 专区 present = 1，其余 = 0；
+    - 没有向量的书不进样本——打分时它本就参与不了，评估也不该凭空补一个。
+    """
     conn = store.read_conn()
     try:
         rows = conn.execute(
-            "SELECT b.book_id, b.display_name, f.zone FROM books b"
-            " JOIN files f ON f.book_id = b.book_id"
-            " WHERE f.present = 1 ORDER BY b.book_id"
+            "SELECT b.book_id,"
+            "       MAX(CASE WHEN f.zone = 'liked' THEN 1 ELSE 0 END) AS label"
+            " FROM books b JOIN files f ON f.book_id = b.book_id"
+            " WHERE f.present = 1"
+            " GROUP BY b.book_id ORDER BY b.book_id"
         ).fetchall()
     finally:
         conn.close()
-    return [(f"b{int(r[0])}", str(r[1]), 1 if r[2] == "liked" else 0) for r in rows]
+    vectors = load_vectors(store)
+    return [
+        (format_rank_book_id(bid), vectors[bid], 1 if label else 0)
+        for bid, label in rows if vectors.get(bid)
+    ]
 
 
 def load_axis_ids(store) -> tuple[str, ...]:
@@ -179,36 +218,92 @@ def mute_map_from_store(store) -> dict[str, Any]:
     return mute
 
 
+def _assemble(store) -> dict:
+    """库态 → 一次装配（rank_candidates / explain_book 共用，零复制）。
+
+    候选域 = candidate 专区；正样本向量 = 全库 liked（含同书双区）口径。
+    本层零排序（A6），装配结果原样交给 reco_core。
+    """
+    vectors = load_vectors(store)
+    books = load_books(store)
+    candidate_books = load_candidate_books(store)
+    positive_books = load_positive_books(store)
+    candidates = [
+        (format_rank_book_id(bid), {"dedup_key": key, "vector": vectors.get(bid, {})})
+        for bid, key in candidate_books
+    ]
+    positive_vectors = tuple(vectors[bid] for bid, _key in positive_books if vectors.get(bid))
+    return {
+        "vectors": vectors,
+        "books": books,
+        "candidates": candidates,
+        "positive_vectors": positive_vectors,
+        "profile": load_profile(store),
+        "mute": mute_map_from_store(store),
+        "n_candidates": len(candidates),
+        "n_vectors": len(vectors),  # 库级：空态区分「是否已生产向量」
+        "n_positive": len(positive_vectors),  # 质心成员数（liked 且有向量）
+        "n_skipped": max(0, len(candidate_books)
+                         - sum(1 for bid, _key in candidate_books if vectors.get(bid))),
+    }
+
+
+def explain_book(store, book_id, config=None) -> dict:
+    """单书理由解释：与 recommend 走同一次装配，理由逐位一致（#98）。
+
+    修复前 CLI 拿空向量调 score.explain，_synthesize 跳过空向量 → 恒 no_features。
+    这里只把这本书单独交给同一个静音感知入口（similarity/model/behavior 三路
+    都按书计算，与候选集大小无关），不改写任何打分公式。
+    返回 {status, book_id, reasons, muted}；status ∈ ok/no_features/unknown_book。
+    """
+    from reco_core.feedback import rank_only
+
+    bid = int(book_id)
+    a = _assemble(store)
+    keys = dict(a["books"])
+    if bid not in keys:
+        return {"status": "unknown_book", "book_id": bid, "reasons": (), "muted": False}
+    vec = a["vectors"].get(bid)
+    if not vec:
+        return {"status": "no_features", "book_id": bid, "reasons": (), "muted": False}
+    out = rank_only(
+        [(format_rank_book_id(bid), {"dedup_key": keys.get(bid), "vector": vec})],
+        a["profile"], mute=a["mute"], positive_vectors=a["positive_vectors"],
+        config=config,
+    )
+    rows = list(out.get("rank_rows") or ())
+    if not rows:
+        return {"status": "no_features", "book_id": bid, "reasons": (), "muted": False}
+    row = rows[0]
+    return {
+        "status": "ok",
+        "book_id": bid,
+        "reasons": tuple(row.reasons),
+        "muted": row.book_id in set(out.get("muted") or ()),
+    }
+
+
 def rank_candidates(store, config=None) -> dict:
     """唯一装配：库态 → 画像/静音/真实候选向量 → rank_only 唯一入口（A6）。
 
     候选域 = candidate 专区（T4；liked 只作正样本，推荐专区为输出落位）。
-    返回 {rank_rows, profile, muted, names, n_candidates, n_vectors, n_skipped}；
-    n_candidates = 候选书数，n_vectors = 库级有向量书数（空态区分「是否已生产
-    向量」），n_skipped = 候选缺向量书数。排序由 reco_core 完成，本层零排序；
+    返回 {rank_rows, profile, muted, names, n_candidates, n_vectors, n_positive,
+    n_skipped}；n_candidates = 候选书数，n_vectors = 库级有向量书数（空态区分
+    「是否已生产向量」），n_positive = 质心成员数（liked 且有向量），n_skipped =
+    候选缺向量书数。排序由 reco_core 完成，本层零排序；
     无向量候选照常进候选装配（score 侧跳过并计数——§6.3 不静默当 0 分）。
     """
     from reco_core.feedback import rank_only
 
-    vectors = load_vectors(store)
-    books = load_books(store)  # 全库身份：正样本向量口径（liked 仍参与正样本）
-    candidate_books = load_candidate_books(store)  # 候选域：candidate 专区
-    candidates = [
-        (f"b{bid}", {"dedup_key": key, "vector": vectors.get(bid, {})})
-        for bid, key in candidate_books
-    ]
-    positive_vectors = tuple(
-        vectors[bid] for bid, _key in books if vectors.get(bid)
-    )
-    candidate_vector_count = sum(1 for bid, _key in candidate_books if vectors.get(bid))
-    profile = load_profile(store)
-    mute = mute_map_from_store(store)
-    out = rank_only(candidates, profile, mute=mute, positive_vectors=positive_vectors,
+    a = _assemble(store)
+    out = rank_only(a["candidates"], a["profile"], mute=a["mute"],
+                    positive_vectors=a["positive_vectors"],
                     config=config)  # #82：生成篇数（探索位配额）由此贯通到 rank
     out["names"] = load_book_names(store)
-    out["n_candidates"] = len(candidates)
-    out["n_vectors"] = len(positive_vectors)  # 库级：空态区分「是否已生产向量」
-    out["n_skipped"] = max(0, len(candidate_books) - candidate_vector_count)
+    out["n_candidates"] = a["n_candidates"]
+    out["n_vectors"] = a["n_vectors"]
+    out["n_positive"] = a["n_positive"]
+    out["n_skipped"] = a["n_skipped"]
     return out
 
 
@@ -257,4 +352,3 @@ def persist_rank_run(store, out, *, now: str, actor: str,
         actor=str(actor),
     )
     return str(run_id)
-

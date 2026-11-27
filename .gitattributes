@@ -1,0 +1,4 @@
+# app.py 的历史 blob 是 CRLF（早于本仓库开启 core.autocrlf 的提交）。
+# 若不声明 -text，检出后第一次提交就会把整文件转成 LF，20 余行的真实改动
+# 在 diff 里放大成 1775 行整文件重写——评审看不到改动本身。
+packages/reco-ui/src/reco_ui/app.py -text

@@ -140,7 +140,17 @@ def _validate_payload(payload: dict) -> str:
             raise PayloadViolationError(f"payload 含白名单外键: {key!r}")
         if val is None:
             continue
-        if isinstance(val, (str, int, float, bool)):
+        if isinstance(val, int) and not isinstance(val, bool):
+            # #107：Windows 的 st_dev/st_ino 是无符号 64 位，超出 SQLite 有符号
+            # int64 时 sqlite3 会抛裸 OverflowError（事件整体回滚、无上下文）。
+            # 编码层统一拒绝，并指向唯一的编码函数。
+            if not -(2**63) <= val < 2**63:
+                raise PayloadViolationError(
+                    f"payload 整数超出 int64: {key!r}={val}；"
+                    "无符号 64 位身份请先用 reco_io.int64.to_int64 编码"
+                )
+            continue
+        if isinstance(val, (str, float, bool)):
             continue
         # RR2/t3：唯一例外 aliases——标量字符串数组（种子别名一体落库），
         # 其余键仍必须为标量（B6 白名单纪律不放松）。
@@ -193,7 +203,8 @@ CREATE TABLE IF NOT EXISTS files(
   last_seen_at TEXT NOT NULL,
   moved_from_path TEXT
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uq_files_present ON files(volume_id, st_ino) WHERE present = 1;
+-- #97：同 inode 多路径（硬链接孪生）是合法形态，身份不唯一；路径唯一性由 files.path 承担。
+CREATE INDEX IF NOT EXISTS ix_files_identity ON files(volume_id, st_ino) WHERE present = 1;
 CREATE INDEX IF NOT EXISTS ix_files_zone ON files(zone, present);
 CREATE INDEX IF NOT EXISTS ix_files_book ON files(book_id);
 
@@ -396,7 +407,7 @@ COMPARE_TABLES: tuple[str, ...] = (
     "volumes", "files", "books", "features", "feature_vectors", "tags",
     "tag_aliases", "book_tags", "relation_graphs", "relation_fields",
     "signals", "events", "profile_versions", "rec_runs", "recommendations",
-    "mutes",
+    "mutes", "proposals",
 )
 
 
@@ -470,10 +481,15 @@ def _apply_event(conn: sqlite3.Connection, event: Event) -> None:
         conn.execute("UPDATE files SET present = 0, last_seen_at = ? WHERE path = ?", (at, p["path"]))
     elif t == "file_moved":
         # N1/W19：跨专区移动携带 zone → 同步搬迁专区（COALESCE；不带 zone 保持原专区，向后兼容——旧移动事件可逐位重放，ADR-0003；zone 变更与路径变更同一事件同一事务）。
+        # #106：移动同时改内容时顺带刷新 size/mtime/ext（缺键事件逐位重放不变）。
         conn.execute(
             "UPDATE files SET path = ?, last_seen_at = ?, moved_from_path = ?,"
-            " zone = COALESCE(?, zone) WHERE path = ?",
-            (p["new_path"], at, p["path"], p.get("zone"), p["path"]),
+            " zone = COALESCE(?, zone),"
+            " size_bytes = COALESCE(?, size_bytes),"
+            " mtime_ns = COALESCE(?, mtime_ns),"
+            " ext = COALESCE(?, ext) WHERE path = ?",
+            (p["new_path"], at, p["path"], p.get("zone"),
+             p.get("size_bytes"), p.get("mtime_ns"), p.get("ext"), p["path"]),
         )
     elif t == "tag_added":
         conn.execute(
@@ -504,6 +520,28 @@ def _apply_event(conn: sqlite3.Connection, event: Event) -> None:
         src = str(p.get("source") or "auto")
         conn.execute("DELETE FROM book_tags WHERE book_id = ? AND tag_id = ? AND source = ?",
                      (event.book_id, p["tag_id"], src))
+    elif t == "label_moved":
+        # #104：合并搬迁人工行（merge 是用户动作，不是自动提取——D1 保护的是
+        # auto 覆盖，不是人工合并）。行内 source/confidence/basis/updated_at 原样
+        # 保留，只改指向；目标已有行时保留目标行（人工已有判断优先）。
+        row = conn.execute(
+            "SELECT source, confidence, basis_json, updated_at FROM book_tags"
+            " WHERE book_id = ? AND tag_id = ?",
+            (event.book_id, p["tag_id"]),
+        ).fetchone()
+        if row is not None:
+            conn.execute("DELETE FROM book_tags WHERE book_id = ? AND tag_id = ?",
+                         (event.book_id, p["tag_id"]))
+            exists = conn.execute(
+                "SELECT 1 FROM book_tags WHERE book_id = ? AND tag_id = ?",
+                (event.book_id, p["into"]),
+            ).fetchone()
+            if exists is None:
+                conn.execute(
+                    "INSERT INTO book_tags(book_id, tag_id, source, confidence, basis_json, updated_at)"
+                    " VALUES(?,?,?,?,?,?)",
+                    (event.book_id, p["into"], *row),
+                )
     elif t == "signal_recorded":
         conn.execute(
             "INSERT INTO signals(book_id, kind, value, occurred_at, source, session_id) VALUES(?,?,?,?,?,?)",
@@ -639,6 +677,8 @@ class Store:
         self.write_conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         _configure(self.write_conn, writer=True)
         self.write_conn.executescript(SCHEMA_SQL)
+        # 老库迁移：身份唯一索引会把硬链接孪生判成冲突（#97），幂等拆除。
+        self.write_conn.execute("DROP INDEX IF EXISTS uq_files_present")
         row = self.write_conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
         if row is None:
             self.write_conn.executemany(
@@ -896,13 +936,15 @@ _DUMP_SQL: dict[str, str] = {
     "rec_runs": "SELECT * FROM rec_runs ORDER BY rowid",
     "recommendations": "SELECT * FROM recommendations ORDER BY rowid",
     "mutes": "SELECT * FROM mutes ORDER BY rowid",
+    # #111：proposals 过去不在比对面——重放漂移在审核列表上不可见。
+    "proposals": "SELECT * FROM proposals ORDER BY rowid",
 }
 
 
 def _dump_rows(db_path: str | Path, table: str) -> list[tuple]:
     """整表快照（重放比对用）：语句取自**常量映射**，不做任何字符串拼接。
 
-    重放比对需遍历 15 张表，而 SQLite 不支持参数化标识符；这里把每条语句
+    重放比对需遍历 COMPARE_TABLES 全部表，而 SQLite 不支持参数化标识符；这里把每条语句
     预先写成常量字面量，表名只用作字典键——无拼接、无用户输入路径
     （Code Scanning #6/#7 的消除方式）。
     """

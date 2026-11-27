@@ -38,7 +38,7 @@ def record_tag_hits(store: LabelsStore, book_id: int, hits,
         basis_json = _serialize_basis(hit.basis)
         conflict = hit.basis.get("conflict")
         if conflict:
-            store.append_event("tag_conflict", {
+            store.record_label_event("tag_conflict", {
                 "alias": conflict.get("alias"),
                 "candidates": sorted(conflict.get("candidates", ())),
                 "winner": conflict.get("winner"),

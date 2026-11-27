@@ -30,9 +30,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from reco_io.int64 import from_int64, to_int64
-from reco_io.scanner import scan_zones
+from reco_io.scanner import FileFingerprint, classify_delta, scan_zones
 from reco_io.perf import perf_span
 from reco_store import Store, dedup_key, normalize_book_name
+from reco_store.reads import zone_file_identities
 
 # GUI 再扫描落库口径（config_fingerprint 留痕；扫描/导入/种子各有前缀不混流）
 SYNC_SCAN_FP = "gui/resync/1"
@@ -59,26 +60,20 @@ def _fingerprints(result) -> tuple:
     return tuple(sorted(result.fingerprints))
 
 
-def _zone_history(store: Store, zone: str) -> dict[str, tuple[int, int, int, int]]:
-    """本专区 present=1 前史：path → (dev, ino, size, mtime_ns)（身份域无符号）。"""
-    conn = store.read_conn()
-    try:
-        rows = conn.execute(
-            "SELECT path, st_dev, st_ino, size_bytes, mtime_ns FROM files"
-            " WHERE zone = ? AND present = 1",
-            (zone,),
-        ).fetchall()
-    finally:
-        conn.close()
-    history: dict[str, tuple[int, int, int, int]] = {}
-    for path, st_dev, st_ino, size, mtime in rows:
-        history[str(path)] = (
-            from_int64(int(st_dev)),  # db 侧 int64 → 无符号（配对域）
-            from_int64(int(st_ino)),
-            int(size),
-            int(mtime),
+def _zone_history(store: Store, zone: str) -> tuple[FileFingerprint, ...]:
+    """本专区 present=1 前史快照（身份域无符号，可直接喂 classify_delta）。"""
+    return tuple(sorted(
+        FileFingerprint(
+            st_dev=from_int64(int(st_dev)),  # db 侧 int64 → 无符号（配对域）
+            st_ino=from_int64(int(st_ino)),
+            size_bytes=int(size),
+            mtime_ns=int(mtime),
+            path=str(path),
+            zone=zone,
+            ext=os.path.splitext(str(path))[1].lower(),
         )
-    return history
+        for path, st_dev, st_ino, size, mtime in zone_file_identities(store, zone)
+    ))
 
 
 def _file_added_payload(fp, *, zone: str) -> dict:
@@ -124,51 +119,29 @@ def sync_zone(
     # scan_zones 返回全部专区指纹；本专区同步只消费本专区的当前快照
     # （跨专区移动由源专区「移除」+目标专区「新增」两轮各落一态，§8 口径）。
     current = tuple(fp for fp in _fingerprints(result) if fp.zone == zone)
-    history = _zone_history(store, zone)
     with perf_span("ui.sync_zone"):
-        added: list = []
-        changed: list = []
-        for fp in current:
-            prev = history.pop(fp.path, None)
-            if prev is None:
-                added.append(fp)
-            elif (prev[2], prev[3]) != (int(fp.size_bytes), int(fp.mtime_ns)):
-                changed.append(fp)  # 同身份同路径内容变化 → file_added upsert 刷新
-            else:
-                pass  # 未变：零事件
-        # 同专区移动判定（本票口径）：新增候选与「消失前史」按无符号身份四元组
-        # (dev, ino, size, mtime_ns) 配对 → file_moved（dedup_key 继承 book_id）。
-        # 配对确定性：added 按 path 序消费；每身份至多配一个（重复身份=硬链接
-        # 孪生形态，桶按计数消费）。配不上的消失前史 = 移除（墓碑）。
-        vanished: dict[tuple[int, int, int, int], list[tuple[str, tuple]]] = {}
-        for path, prev in history.items():
-            vanished.setdefault(prev, []).append((path, prev))
-        moved: list[tuple[str, object]] = []
-        still_added: list = []
-        for fp in sorted(added, key=lambda f: f.path):
-            key = (int(fp.st_dev), int(fp.st_ino), int(fp.size_bytes), int(fp.mtime_ns))
-            bucket = vanished.get(key)
-            if bucket:
-                old_path, _prev = bucket.pop(0)
-                if not bucket:
-                    del vanished[key]
-                moved.append((old_path, fp))
-            else:
-                still_added.append(fp)
-        removed = [path for bucket in vanished.values() for path, _prev in bucket]
-        for fp in still_added:
+        # 差分只有一份实现（reco_io.scanner.classify_delta）：按身份 (st_dev, st_ino)
+        # 双指针归并，得 added / removed / moved / changed 四态（#106）。
+        delta = classify_delta(_zone_history(store, zone), current)
+        for fp in delta.added:
             store.append_event("file_added", payload=_file_added_payload(fp, zone=zone),
                                occurred_at=now, config_fingerprint=SYNC_SCAN_FP, actor="system")
-        for fp in changed:
-            store.append_event("file_added", payload=_file_added_payload(fp, zone=zone),
+        for pair in delta.changed:
+            store.append_event("file_added", payload=_file_added_payload(pair.current, zone=zone),
                                occurred_at=now, config_fingerprint=SYNC_SCAN_FP, actor="system")
-        for path in removed:
-            store.append_event("file_removed", payload={"path": path},
-                               occurred_at=now, config_fingerprint=SYNC_SCAN_FP, actor="system")
-        for old_path, fp in moved:
+        for pair in delta.moved:
+            # 移动同时改内容很常见：file_moved 顺带带上当前尺寸/mtime/ext（投影 COALESCE
+            # 覆盖，缺键的旧事件逐位重放不变），不额外造一条 file_added 把 moved_from_path 擦掉。
             store.append_event("file_moved", payload={
-                "path": old_path,
-                "new_path": str(fp.path),
+                "path": pair.previous.path,
+                "new_path": str(pair.current.path),
                 "zone": zone,
+                "ext": str(pair.current.ext),
+                "size_bytes": int(pair.current.size_bytes),
+                "mtime_ns": int(pair.current.mtime_ns),
             }, occurred_at=now, config_fingerprint=SYNC_SCAN_FP, actor="system")
-        return SyncResult(added=len(still_added), removed=len(removed), moved=len(moved), changed=len(changed))
+        for fp in delta.removed:
+            store.append_event("file_removed", payload={"path": fp.path},
+                               occurred_at=now, config_fingerprint=SYNC_SCAN_FP, actor="system")
+        return SyncResult(added=len(delta.added), removed=len(delta.removed),
+                          moved=len(delta.moved), changed=len(delta.changed))

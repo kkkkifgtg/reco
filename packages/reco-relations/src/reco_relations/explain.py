@@ -8,19 +8,23 @@ from __future__ import annotations
 
 from typing import Any
 
-from .extract import _KNOWN_PREFIXES
+from reco_core.axes import AXIS_PREFIX as _AXIS_PREFIX
 
-# 轴名 → basis 前缀映射（traits 覆盖两个前缀；边轴带 edge. 前缀）
+# 轴名 → basis 前缀映射（traits 覆盖两个前缀；边轴带 edge. 前缀）。
+# 前缀取自 reco_core.axes（seed 造 id 用的同一张表，#99）——此前这里用全称
+# （topology./power./consent./evolution.），而 seed 造的是缩写，五个轴恒无依据。
 _AXIS_PREFIXES: dict[str, tuple[str, ...]] = {
-    "role": ("role",),
-    "age_group": ("age",),
-    "traits": ("archetype", "body"),
+    "role": (_AXIS_PREFIX["role"],),
+    "age_group": (_AXIS_PREFIX["age"],),
+    "traits": (_AXIS_PREFIX["archetype"], _AXIS_PREFIX["body"]),
+    # rel.* 是 §6.1 图契约的边类型来源；生产 seed 未建对应轴，故 edge.type 在
+    # 真实数据上保持 unknown（此处只认领已存在的依据，不凭空造来源）。
     "edge.type": ("rel",),
-    "edge.mechanism": ("mech",),
-    "edge.consent": ("consent",),
-    "topology": ("topology",),
-    "power_balance": ("power",),
-    "evolution": ("evolution",),
+    "edge.mechanism": (_AXIS_PREFIX["mechanism"],),
+    "edge.consent": (_AXIS_PREFIX["consent"],),
+    "topology": (_AXIS_PREFIX["topology"],),
+    "power_balance": (_AXIS_PREFIX["power"],),
+    "evolution": (_AXIS_PREFIX["evolution"],),
 }
 
 

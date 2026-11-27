@@ -186,7 +186,9 @@ def test_recommendation_invariants(tmp_path):
                 "SELECT DISTINCT book_id FROM files WHERE zone='liked' AND present=1")}
         finally:
             conn.close()
-        rec_ids = {int(str(r.book_id).lstrip("b")) for r in rows}
+        from reco_store.rank_id import parse_rank_book_id
+
+        rec_ids = {parse_rank_book_id(r.book_id) for r in rows}
         assert not (rec_ids & liked), "liked 书不得出现在推荐里"
     finally:
         s.close()

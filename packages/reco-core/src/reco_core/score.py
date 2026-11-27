@@ -416,19 +416,45 @@ def _lazy_imports():
     return TfidfVectorizer, LogisticRegression
 
 
+def _feature_matrix(features):
+    """样本特征 → 训练矩阵：特征向量（dict）直接落稀疏矩阵，文本走旧 TF-IDF。
+
+    打分用的是特征向量，样本也必须是同一份材料（#103）；文本分支只为兼容旧调用方。
+    """
+    if features and all(isinstance(f, dict) for f in features):
+        from scipy.sparse import csr_matrix
+
+        dims = sorted({int(d) for f in features for d in f})
+        index = {d: i for i, d in enumerate(dims)}
+        indptr = [0]
+        indices: list[int] = []
+        data: list[float] = []
+        for f in features:
+            for dim, weight in sorted(f.items()):
+                indices.append(index[int(dim)])
+                data.append(float(weight))
+            indptr.append(len(indices))
+        return csr_matrix((data, indices, indptr), shape=(len(features), len(dims)))
+    vec_cls, _clf_cls = _lazy_imports()
+    vectorizer = vec_cls(analyzer="char", ngram_range=(2, 3), min_df=1)
+    return vectorizer.fit_transform([str(f) for f in features])
+
+
 def train_pairwise(labeled_features, config=None):
-    """成对分类器训练：仅 n_pos≥10 且 n_neg≥10 返回句柄，否则 None（§6.3）。"""
-    labels = [int(lbl) for _bid, _text, lbl in labeled_features]
+    """成对分类器训练：仅 n_pos≥10 且 n_neg≥10 返回句柄，否则 None（§6.3）。
+
+    样本 = (book_id, 特征, label)，特征为打分同源的特征向量（dict）时直接用矩阵，
+    旧文本样本仍按 TF-IDF 处理。
+    """
+    labels = [int(lbl) for _bid, _features, lbl in labeled_features]
     n_pos = sum(1 for lbl in labels if lbl == 1)
     n_neg = len(labels) - n_pos
     if n_pos < _PAIRWISE_MIN or n_neg < _PAIRWISE_MIN:
         return None
-    vec_cls, clf_cls = _lazy_imports()
-    texts = [text for _bid, text, _lbl in labeled_features]
-    vectorizer = vec_cls(analyzer="char", ngram_range=(2, 3), min_df=1)
-    matrix = vectorizer.fit_transform(texts)
+    _vec_cls, clf_cls = _lazy_imports()
+    matrix = _feature_matrix([features for _bid, features, _lbl in labeled_features])
     clf = clf_cls().fit(matrix, labels)
-    return ModelHandle(status="ready", version="pairwise/1", estimator=(vectorizer, clf))
+    return ModelHandle(status="ready", version="pairwise/1", estimator=(None, clf))
 
 
 def _auc_from_scores(scored):
@@ -460,13 +486,14 @@ def _auc_ci(auc, n_pos, n_neg):
 def evaluate_pairwise(samples, config=None):
     """成对交叉验证评估（§6.3：正 vs 负、CV、AUC 与 95% 置信区间）。
 
-    样本 = (book_id, text, label)。正负任一为空 → 如实
+    样本 = (book_id, 特征, label)：特征与打分同源（特征向量 dict 直接用矩阵，
+    旧文本样本走 TF-IDF）。正负任一为空 → 如实
     {auc: None, verdict: "不足以判定", folds: 0}（禁止伪造 0.5/AUC）。
     折数 = min(5, 少数类样本量)；折内训练集须两类齐全才训。
     CI 覆盖 0.5 → verdict="尚不显著"（§6.3：置信区间跨 0.5 时明示）。
     sklearn 首次调用时才导入（F5）。
     """
-    labels = [int(lbl) for _bid, _text, lbl in samples]
+    labels = [int(lbl) for _bid, _features, lbl in samples]
     n_pos = sum(1 for lbl in labels if lbl == 1)
     n_neg = len(labels) - n_pos
     insufficient = {
@@ -476,11 +503,9 @@ def evaluate_pairwise(samples, config=None):
     }
     if n_pos == 0 or n_neg == 0:
         return insufficient
-    vec_cls, clf_cls = _lazy_imports()
-    texts = [text for _bid, text, _lbl in samples]
+    _vec_cls, clf_cls = _lazy_imports()
     n = len(samples)
-    vectorizer = vec_cls(analyzer="char", ngram_range=(2, 3), min_df=1)
-    matrix = vectorizer.fit_transform(texts)
+    matrix = _feature_matrix([features for _bid, features, _lbl in samples])
     folds = min(_CV_FOLDS, min(n_pos, n_neg))
     scored = []
     for fold in range(folds):

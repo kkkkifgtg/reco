@@ -38,7 +38,7 @@ def _payloads(raw, event_type: str):
 
 
 def _proposal_cols(db_path):
-    """proposals 不在 COMPARE_TABLES——状态列的重放一致性显式逐位比对。"""
+    """状态列的重放一致性显式逐位比对（#111 起 proposals 也在 COMPARE_TABLES 内）。"""
     conn = sqlite3.connect(db_path)
     try:
         return conn.execute(

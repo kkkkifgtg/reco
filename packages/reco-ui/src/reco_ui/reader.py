@@ -16,12 +16,11 @@ from __future__ import annotations
 
 import html
 import os
-import posixpath
 import re
 import zipfile
 from pathlib import Path
-from urllib.parse import unquote
-from xml.etree import ElementTree as ET
+
+from reco_io.textkit import decode_bytes, epub_opf_members, strip_embedded
 
 __all__ = [
     "CHUNK_CHARS",
@@ -38,12 +37,6 @@ CHUNK_CHARS = 120_000
 # 错误枚举：ReaderError.reason 只允许这几种；新增枚举即破坏「只报枚举」口径。
 READER_REASONS = ("corrupt_container", "undecodable", "not_found", "oversized")
 
-_CONTAINER_MEMBER = "META-INF/container.xml"
-_OPF_MEDIA_TYPE = "application/oebps-package+xml"
-# spine 里只把「可当文本渲染」的条目当章节；图片/字体等非 HTML 项跳过。
-_TEXT_MEDIA_TYPES = frozenset(
-    {"application/xhtml+xml", "text/html", "application/xml", "text/xml", ""}
-)
 # load_book_text 允许的格式：txt/md 走解码链；docx/pdf 复用提取器接缝（epub 走 parse_epub_spine）。
 _PLAIN_SUFFIXES = frozenset({".txt", ".md"})
 _READER_SUFFIXES = frozenset({".docx", ".pdf"})
@@ -92,14 +85,16 @@ def parse_epub_spine(path) -> list[dict]:
         raise ReaderError(source, "corrupt_container") from None
 
     with archive:
-        opf_member = _locate_opf_member(archive, source)
-        spine = _read_spine_members(archive, opf_member, source)
+        try:
+            spine = epub_opf_members(archive)  # spine 顺序只有一份实现（reco_io.textkit）
+        except ValueError:
+            raise ReaderError(source, "corrupt_container") from None
         chapters: list[dict] = []
         for member in spine:
             markup = _read_chapter_markup(archive, member, source)
             if markup is None:
                 continue  # 引用存在但成员缺失：跳过该章，其余章仍可读
-            sanitized = _strip_embedded(markup)
+            sanitized = strip_embedded(markup)
             chapters.append(
                 {
                     "index": len(chapters),
@@ -114,83 +109,6 @@ def parse_epub_spine(path) -> list[dict]:
     return chapters
 
 
-def _localname(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1]
-
-
-def _locate_opf_member(archive: zipfile.ZipFile, source: Path) -> str:
-    try:
-        raw = archive.read(_CONTAINER_MEMBER)
-    except KeyError:
-        raise ReaderError(source, "corrupt_container") from None
-    except (zipfile.BadZipFile, OSError):
-        raise ReaderError(source, "corrupt_container") from None
-    try:
-        root = ET.fromstring(raw)
-    except ET.ParseError:
-        raise ReaderError(source, "corrupt_container") from None
-
-    rootfiles = [element for element in root.iter() if _localname(element.tag) == "rootfile"]
-    preferred = [
-        element
-        for element in rootfiles
-        if (element.get("media-type") or "").strip() == _OPF_MEDIA_TYPE
-    ]
-    for element in preferred or rootfiles:
-        full_path = (element.get("full-path") or "").strip()
-        if full_path:
-            return _normalize_member(full_path)
-    raise ReaderError(source, "corrupt_container")
-
-
-def _normalize_member(name: str) -> str:
-    cleaned = unquote(name.replace("\\", "/")).split("#", 1)[0].lstrip("/")
-    normalized = posixpath.normpath(cleaned)
-    return "" if normalized == "." else normalized
-
-
-def _resolve_member(base: str, href: str) -> str:
-    return _normalize_member(posixpath.join(base, href) if base else href)
-
-
-def _read_spine_members(archive: zipfile.ZipFile, opf_member: str, source: Path) -> list[str]:
-    try:
-        raw = archive.read(opf_member)
-    except KeyError:
-        raise ReaderError(source, "corrupt_container") from None
-    except (zipfile.BadZipFile, OSError):
-        raise ReaderError(source, "corrupt_container") from None
-    try:
-        root = ET.fromstring(raw)
-    except ET.ParseError:
-        raise ReaderError(source, "corrupt_container") from None
-
-    manifest: dict[str, tuple[str, str]] = {}
-    for element in root.iter():
-        if _localname(element.tag) != "item":
-            continue
-        item_id = (element.get("id") or "").strip()
-        href = (element.get("href") or "").strip()
-        if item_id and href:
-            manifest[item_id] = (href, (element.get("media-type") or "").strip().lower())
-
-    base = posixpath.dirname(opf_member)
-    spine: list[str] = []
-    for element in root.iter():
-        if _localname(element.tag) != "itemref":
-            continue
-        entry = manifest.get((element.get("idref") or "").strip())
-        if entry is None:
-            continue
-        href, media_type = entry
-        if media_type not in _TEXT_MEDIA_TYPES:
-            continue
-        spine.append(_resolve_member(base, href))
-    if not spine:
-        raise ReaderError(source, "corrupt_container")
-    return spine
-
-
 def _read_chapter_markup(archive: zipfile.ZipFile, member: str, source: Path) -> str | None:
     try:
         raw = archive.read(member)
@@ -199,22 +117,13 @@ def _read_chapter_markup(archive: zipfile.ZipFile, member: str, source: Path) ->
     except (zipfile.BadZipFile, OSError):
         raise ReaderError(source, "corrupt_container") from None
     try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        pass
-    try:
-        return raw.decode("gb18030")  # strict：失败即 undecodable，不猜编码
+        return decode_bytes(raw)  # 与提取层同一条解码链（BOM → utf-8 → gb18030）
     except UnicodeDecodeError:
         raise ReaderError(source, "undecodable") from None
 
 
-_EMBEDDED_RE = re.compile(r"(?is)<(script|style|iframe)\b[^>]*>.*?</\1\s*>")
-_EMBEDDED_STRAY_RE = re.compile(r"(?is)</?(?:script|style|iframe)\b[^>]*/?>")
-
-
-def _strip_embedded(markup: str) -> str:
-    """剥离 script/style/iframe（连内容），再清掉残留的自闭合/孤立标签。"""
-    return _EMBEDDED_STRAY_RE.sub("", _EMBEDDED_RE.sub("", markup))
+# 剥离实现只有一份（reco_io.textkit，#112）；媒体类型判定也在那里。
+_strip_embedded = strip_embedded
 
 
 _TITLE_RE = re.compile(r"(?is)<title\b[^>]*>(.*?)</title\s*>")
@@ -320,15 +229,11 @@ def _format_reader(suffix: str):
 
 
 def _decode_full_text(raw: bytes, source: Path) -> str:
+    """全量解码：委托 textkit（BOM → utf-8 → gb18030，统一 LF），失败即 undecodable。"""
     try:
-        text = raw.decode("utf-8")
+        return decode_bytes(raw)
     except UnicodeDecodeError:
-        try:
-            text = raw.decode("gb18030")  # strict：失败即 undecodable，不猜编码
-        except UnicodeDecodeError:
-            raise ReaderError(source, "undecodable") from None
-    # 统一 LF：渲染、光标偏移与分块只认一种换行口径（Windows 源文件常带 CRLF）。
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+        raise ReaderError(source, "undecodable") from None
 
 
 # ---------------------------------------------------------- 分块

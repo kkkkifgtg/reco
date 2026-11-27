@@ -10,12 +10,12 @@
 from __future__ import annotations
 
 from reco_ui.qt import (
+    QCheckBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QObject,
     QPushButton,
-    QRunnable,
     QTableWidget,
     QTableWidgetItem,
     QThreadPool,
@@ -23,8 +23,7 @@ from reco_ui.qt import (
     QWidget,
     pyqtSignal,
 )
-
-_ACTIVE_PROPOSAL_WORKERS: set = set()
+from reco_ui.workers import PoolWorker
 
 
 class ProposalActionSignals(QObject):
@@ -33,8 +32,10 @@ class ProposalActionSignals(QObject):
     done = pyqtSignal(list, str)
 
 
-class ProposalActionWorker(QRunnable):
+class ProposalActionWorker(PoolWorker):
     """池线程执行「采纳/拒绝 + 重查 pending 列表」（§11.1 UI 线程零 DB）。"""
+
+    SIGNALS = ProposalActionSignals
 
     def __init__(self, store, action: str, candidate: str, axis: str = "tag") -> None:
         super().__init__()
@@ -42,8 +43,6 @@ class ProposalActionWorker(QRunnable):
         self._action = action
         self._candidate = candidate
         self._axis = axis
-        self.signals = ProposalActionSignals()
-        _ACTIVE_PROPOSAL_WORKERS.add(self)
 
     def run(self) -> None:
         from reco_labels.auto_tag import StoreAdapter
@@ -68,14 +67,6 @@ class ProposalActionWorker(QRunnable):
             self._emit([], f"{message}（列表刷新失败：{type(exc).__name__}）")
             return
         self._emit(rows, message)
-
-    def _emit(self, rows: list, message: str) -> None:
-        try:
-            self.signals.done.emit(list(rows), message)
-        except RuntimeError:
-            pass  # 接收方已销毁
-        finally:
-            _ACTIVE_PROPOSAL_WORKERS.discard(self)
 
 
 class ProposalsPage(QWidget):
@@ -102,6 +93,11 @@ class ProposalsPage(QWidget):
         self.search_input.setClearButtonEnabled(True)
         self.search_input.textChanged.connect(self.apply_search)
         layout.addWidget(self.search_input)
+        # #10：人名/停用词默认折叠到第二屏（仍可采纳，勾选即全部显示）
+        self.show_noise = QCheckBox("显示疑似人名/停用词")
+        self.show_noise.setObjectName("show-noise")
+        self.show_noise.toggled.connect(self.apply_search)
+        layout.addWidget(self.show_noise)
         self._table = QTableWidget(0, 3)
         self._table.setHorizontalHeaderLabels(["候选词", "共现次数", "阈值"])
         layout.addWidget(self._table, 1)
@@ -147,10 +143,12 @@ class ProposalsPage(QWidget):
         self.apply_search()
 
     def apply_search(self) -> None:
-        """按搜索框关键词过滤已加载提案（候选词子串，大小写不敏感；#90）。"""
+        """关键词过滤（#90）+ 噪声折叠（#10）：两项都只影响「显示哪些行」。"""
         keyword = self.search_input.text().strip().casefold()
-        hits = [r for r in self._rows
-                if keyword in str(r.get("candidate", "")).casefold()] if keyword else self._rows
+        matched = [r for r in self._rows
+                   if keyword in str(r.get("candidate", "")).casefold()] if keyword else self._rows
+        folded = 0 if self.show_noise.isChecked() else sum(1 for r in matched if r.get("noise"))
+        hits = matched if self.show_noise.isChecked() else [r for r in matched if not r.get("noise")]
         self._table.setRowCount(len(hits))
         for i, row in enumerate(hits):
             values = [str(row.get("candidate", "")), str(row.get("count", 0)),
@@ -159,7 +157,8 @@ class ProposalsPage(QWidget):
                 self._table.setItem(i, c, QTableWidgetItem(v))
         self.loaded = True
         if self._rows:
-            self._status.setText(f"待确认 {len(hits)} / 共 {len(self._rows)} 条")
+            suffix = f"（已折叠 {folded} 条疑似人名/停用词）" if folded else ""
+            self._status.setText(f"待确认 {len(hits)} / 共 {len(self._rows)} 条{suffix}")
             self.btn_accept.setEnabled(True)
             self.btn_reject.setEnabled(True)
         else:

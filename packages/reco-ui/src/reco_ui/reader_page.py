@@ -29,7 +29,6 @@ from reco_ui.qt import (
     QObject,
     QPlainTextEdit,
     QPushButton,
-    QRunnable,
     QStackedWidget,
     QTextBrowser,
     QTextCursor,
@@ -41,6 +40,8 @@ from reco_ui.qt import (
 )
 from reco_ui.reader import ReaderError, chunk_text, load_book_text, parse_epub_spine
 from reco_ui.reader_signals import SIGNAL_SOURCE, ReadingSession
+from reco_ui.workers import PoolWorker
+from reco_store.reads import first_present_file
 
 __all__ = ["ReaderLoadSignals", "ReaderLoadWorker", "ReaderPage",
            "ReaderLikeMoveSignals", "ReaderLikeMoveWorker",
@@ -50,11 +51,6 @@ _SAVE_DELAY_MS = 1000  # 滚动停止 1s 后落进度（票面口径）
 _APPEND_THRESHOLD_PX = 200  # 距底部小于该像素即预取下一块
 _SIGNAL_FP = "gui/reader/1"  # #73：行为信号落库口径（与反馈/扫描前缀分流）
 
-# 运行中/排队中的 worker 持活注册表：QThreadPool 不持 Python 包装引用，
-# 窗口被 GC 后排队 worker 的包装会悬垂（pages.py 同款生命周期纪律）。
-_ACTIVE_READERS: set = set()
-_ACTIVE_READER_MOVES: set = set()  # #80：阅读页「标为喜欢」真移动 worker 持活
-_ACTIVE_SIGNALS: set = set()  # #73：行为信号落库 worker 持活
 
 
 class ReaderLoadSignals(QObject):
@@ -90,16 +86,17 @@ def _load_payload(path: str) -> dict:
             "title_hint": ""}
 
 
-class ReaderLoadWorker(QRunnable):
+class ReaderLoadWorker(PoolWorker):
     """读文件/解码/分块 worker（池线程；UI 线程零 IO 零解码，§11.1）。"""
+
+    SIGNALS = ReaderLoadSignals
+    SIGNAL_NAME = "loaded"
 
     def __init__(self, path, store=None, book_id=None) -> None:
         super().__init__()
         self._path = str(path)
         self._store = store
         self._book_id = book_id
-        self.signals = ReaderLoadSignals()
-        _ACTIVE_READERS.add(self)
 
     def run(self) -> None:
         try:
@@ -117,14 +114,6 @@ class ReaderLoadWorker(QRunnable):
             return
         self._emit(payload, "")
 
-    def _emit(self, payload, error: str) -> None:
-        try:
-            self.signals.loaded.emit(payload, error)
-        except RuntimeError:
-            pass  # 接收方已销毁
-        finally:
-            _ACTIVE_READERS.discard(self)
-
 
 class ReaderLikeMoveSignals(QObject):
     """阅读页「标为喜欢」完成信号：(ok, moved, error)。
@@ -136,7 +125,7 @@ class ReaderLikeMoveSignals(QObject):
     done = pyqtSignal(bool, bool, str)
 
 
-class ReaderLikeMoveWorker(QRunnable):
+class ReaderLikeMoveWorker(PoolWorker):
     """#80：阅读页「标为喜欢」真移动 worker（池线程：查源+移动+落库，§11.1）。
 
     源查询优先取 zone='candidate' 的 files 行（PR #78 口径）：同一本书在
@@ -145,13 +134,13 @@ class ReaderLikeMoveWorker(QRunnable):
     再回退任意现存专区行；都没有则诚实降级（不移动、不落事件）。
     """
 
+    SIGNALS = ReaderLikeMoveSignals
+
     def __init__(self, store, book_id: int, data_root: str) -> None:
         super().__init__()
         self._store = store
         self._book_id = int(book_id)
         self._data_root = str(data_root)
-        self.signals = ReaderLikeMoveSignals()
-        _ACTIVE_READER_MOVES.add(self)
 
     def run(self) -> None:
         from pathlib import Path
@@ -192,26 +181,8 @@ class ReaderLikeMoveWorker(QRunnable):
 
     def _lookup_source(self):
         """(path, zone) 候选源；优先 candidate 行，其次任意现存专区行。"""
-        conn = self._store.read_conn()
-        try:
-            row = conn.execute(
-                "SELECT path, zone FROM files WHERE book_id = ? AND present = 1"
-                " AND zone = 'candidate' LIMIT 1", (self._book_id,)).fetchone()
-            if row is None:
-                row = conn.execute(
-                    "SELECT path, zone FROM files WHERE book_id = ? AND present = 1"
-                    " ORDER BY file_id LIMIT 1", (self._book_id,)).fetchone()
-        finally:
-            conn.close()
-        return (str(row[0]), str(row[1])) if row is not None else None
-
-    def _emit(self, ok: bool, moved: bool, error: str) -> None:
-        try:
-            self.signals.done.emit(ok, moved, error)
-        except RuntimeError:
-            pass  # 接收方已销毁
-        finally:
-            _ACTIVE_READER_MOVES.discard(self)
+        return (first_present_file(self._store, self._book_id, zone="candidate")
+                or first_present_file(self._store, self._book_id))
 
 
 class ReaderSignalSignals(QObject):
@@ -220,7 +191,7 @@ class ReaderSignalSignals(QObject):
     done = pyqtSignal(int, str)
 
 
-class ReaderSignalWorker(QRunnable):
+class ReaderSignalWorker(PoolWorker):
     """#73：阅读行为信号落库 worker（池线程 append_event，§11.1 UI 线程零 DB）。
 
     只走事件流唯一写路径（signal_recorded → signals 投影），载荷限白名单
@@ -228,14 +199,14 @@ class ReaderSignalWorker(QRunnable):
     失败只静默丢弃（信号是尽力采集，绝不打断阅读），error 供测试与诊断读取。
     """
 
+    SIGNALS = ReaderSignalSignals
+
     def __init__(self, store, book_id: int, records, *, session_id: str) -> None:
         super().__init__()
         self._store = store
         self._book_id = int(book_id)
         self._records = list(records or ())
         self._session_id = str(session_id)
-        self.signals = ReaderSignalSignals()
-        _ACTIVE_SIGNALS.add(self)  # 入队即持活（QThreadPool 不持 Python 包装）
 
     def run(self) -> None:
         written = 0
@@ -259,14 +230,6 @@ class ReaderSignalWorker(QRunnable):
             self._emit(written, "")
         except Exception as exc:  # 信号采集尽力而为，UI 只收字符串
             self._emit(written, f"{type(exc).__name__}: {exc}")
-
-    def _emit(self, written: int, error: str) -> None:
-        try:
-            self.signals.done.emit(int(written), error)
-        except RuntimeError:
-            pass  # 接收方已销毁
-        finally:
-            _ACTIVE_SIGNALS.discard(self)
 
 
 class ReaderPage(QWidget):
@@ -737,7 +700,9 @@ class ReaderPage(QWidget):
         self._set_feedback_buttons_enabled(False)
         from reco_ui.pages import FeedbackWorker
 
-        worker = FeedbackWorker(self._store, "dislike", self._book_id, axis="tag")
+        # #101：不再写死 axis="tag"（分类法里没这个轴）——由 reco_store.feedback
+        # 按书的标签推导主导轴，UI 只表达「不合口味」这个意图。
+        worker = FeedbackWorker(self._store, "dislike", self._book_id)
         worker.signals.done.connect(self._on_dislike_done)
         QThreadPool.globalInstance().start(worker)
 

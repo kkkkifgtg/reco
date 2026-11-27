@@ -10,8 +10,8 @@
   UPDATE proposals.status；提案状态变更从此经事件流落库、可重放恢复。
   修复前形态：append_event("proposal_updated", ...) 抛 ValueError「未知事件类型」。
 
-proposals 不在 COMPARE_TABLES（既有隔离裁定不动），故其重放一致性用
-rebuild_projections + 逐行显式比对钉死。
+proposals 自 #111 起进 COMPARE_TABLES（verify_replay 直接比），
+rebuild_projections + 逐行显式比对仍保留作第二证据。
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ def test_proposal_created_event_carries_json_columns(store, store_module, tmp_pa
     assert row == (1, "tag", PAYLOAD_JSON, EVIDENCE_JSON, "pending", NOW)
 
     assert store.verify_replay().ok
-    # proposals 不在 COMPARE_TABLES——重放一致性显式逐位钉死
+    # 重放一致性显式逐位钉死（verify_replay 也已覆盖 proposals）
     target = tmp_path / "rebuilt.db"
     store_module.rebuild_projections(target, store.read_events())
     assert _rows_of(target, "proposals") == _rows_of(store.path, "proposals")

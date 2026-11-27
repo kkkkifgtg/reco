@@ -14,7 +14,13 @@
 from __future__ import annotations
 
 import codecs
-import html
+from reco_io.textkit import (
+    decode_bytes,
+    epub_opf_members,
+    html_to_text,
+    strip_tags_linear,
+)
+from reco_io.textkit import strip_embedded as _strip_blocks_linear
 import math
 import os
 import time
@@ -32,6 +38,9 @@ EXTRACTOR_VERSION = "reco-stats/1"
 DEFAULT_TOPK = 512
 DEFAULT_NGRAM_RANGE = (2, 3)
 DEFAULT_HIGH_FREQ_MIN = 3
+# 长书截断口径（#112）：重复短语比与 n-gram 桶只在前 N 个非空白字符上计算——
+# 确定性前缀，不是随机采样；char_count 等统计量仍吃全文。改动此值等于改特征，
+# 必须同步 ARCHITECTURE「当前实现口径」与 tests/test_112_shared_text_io.py。
 DEFAULT_REPEAT_WINDOW_CHARS = 1_000_000
 DEFAULT_NUM_BUCKETS = 200_000
 DEFAULT_OVERSIZED_THRESHOLD_BYTES = 50_000_000
@@ -407,96 +416,39 @@ def _feed_file(acc: _Accumulator, path, *, chunk_bytes: int, streamed: bool, sta
 
 
 def _html_to_text(text: str) -> str:
-    """HTML → 纯文本（线性扫描；不用回溯正则，避免病态输入平方级耗时，CWE-1333）。"""
-    text = _strip_blocks_linear(text)
-    text = _strip_tags_linear(text)
-    return html.unescape(text)
+    """HTML → 纯文本：委托 reco_io.textkit（唯一实现，#112）。"""
+    return html_to_text(text)
 
 
-def _strip_tags_linear(text: str) -> str:
-    """等价 `<[^>]+>` → " " 的线性实现；未闭合 '<' 剩余原样保留（正则亦不匹配）。"""
-    out: list[str] = []
-    i = 0
-    n = len(text)
-    while i < n:
-        lt = text.find("<", i)
-        if lt < 0:
-            out.append(text[i:])
-            break
-        gt = text.find(">", lt + 1)
-        if gt < 0:
-            out.append(text[i:])
-            break
-        if gt == lt + 1:  # "<>"：正则不匹配，原样保留
-            out.append(text[i:gt + 1])
-            i = gt + 1
-            continue
-        out.append(text[i:lt])
-        out.append(" ")
-        i = gt + 1
-    return "".join(out)
-
-
-def _strip_blocks_linear(text: str) -> str:
-    """线性剥除 <script|style ...>...</script|style> 块（等价 `_BLOCK_RE` 语义）。"""
-    lowered = text.lower()
-    out: list[str] = []
-    i = 0
-    n = len(text)
-    while i < n:
-        found = _find_block_open(lowered, i)
-        if found is None:
-            out.append(text[i:])
-            break
-        pos, tag = found
-        out.append(text[i:pos])
-        close = _find_block_close(lowered, pos, tag)
-        if close is None:
-            out.append(text[pos:])  # 未闭合块不剥（与正则无匹配一致）
-            break
-        out.append(" ")
-        i = close
-    return "".join(out)
-
-
-def _tag_boundary_ok(text: str, idx: int) -> bool:
-    """tag 名后一个字符须为边界（正则 \b 口径）；到结尾也算边界。"""
-    return idx >= len(text) or not (text[idx].isalnum() or text[idx] == "_")
-
-
-def _find_block_open(lowered: str, start: int):
-    best = None
-    for tag in ("script", "style"):
-        pos = lowered.find("<" + tag, start)
-        while pos >= 0:
-            after = pos + 1 + len(tag)
-            if _tag_boundary_ok(lowered, after) and lowered.find(">", after) >= 0:
-                if best is None or pos < best[0]:
-                    best = (pos, tag)
-                break
-            pos = lowered.find("<" + tag, pos + 1)
-    return best
-
-
-def _find_block_close(lowered: str, pos: int, tag: str):
-    close = lowered.find("</" + tag, pos + 1)
-    while close >= 0:
-        after = close + 2 + len(tag)
-        gt = lowered.find(">", after)
-        if _tag_boundary_ok(lowered, after) and gt >= 0:
-            return gt + 1
-        close = lowered.find("</" + tag, close + 1)
-    return None
+# 旧私有名保留为别名（调用方与测试用它），实现只有 textkit 一份。
+_strip_tags_linear = strip_tags_linear
 
 
 def _epub_text(path) -> str:
-    """zip 容器按成员名排序取 .xhtml/.html/.htm；成员间以空行连接（段落边界）。"""
+    """zip 容器 → 正文：有 OPF 按 spine 顺序，无 OPF 退化为成员名序（#112）。
+
+    spine 顺序 ≠ 文件名序：同一本书里 chapter2.xhtml 完全可能排在 chapter1 之前。
+    退化路径只服务没有 OPF 的合成容器——提取层不能因此拒读整本书，但顺序就不再
+    有语义保证，这一点在 docstring 与测试里都写明。成员间以空行连接（段落边界）。
+    """
     parts = []
     total = 0
     with zipfile.ZipFile(path) as zf:
-        for info in sorted(zf.infolist(), key=lambda i: i.filename):
-            if not info.filename.lower().endswith(_EPUB_TEXT_EXTS):
+        try:
+            members = [(name, True) for name in epub_opf_members(zf)]
+        except ValueError:
+            members = [
+                (info.filename, False)
+                for info in sorted(zf.infolist(), key=lambda i: i.filename)
+                if info.filename.lower().endswith(_EPUB_TEXT_EXTS)
+            ]
+        for member, from_spine in members:
+            if not from_spine and not member.lower().endswith(_EPUB_TEXT_EXTS):
                 continue
+            try:
+                info = zf.getinfo(member)
+            except KeyError:
+                continue  # spine 引用存在但成员缺失：跳过该章，其余章仍可读
             declared = int(info.file_size)
             if _declared_member_oversized(info, declared):
                 raise ValueError("epub member oversized or suspicious compression ratio")
@@ -507,11 +459,7 @@ def _epub_text(path) -> str:
             if len(data) > _MAX_DECOMPRESSED_MEMBER_BYTES:
                 raise ValueError("epub member oversized")
             total += len(data)
-            try:
-                text = data.decode("utf-8")
-            except UnicodeDecodeError:
-                text = data.decode("gb18030")  # strict：失败即 undecodable，不猜
-            parts.append(_html_to_text(text))
+            parts.append(_html_to_text(decode_bytes(data)))
     return "\n\n".join(parts)
 
 
